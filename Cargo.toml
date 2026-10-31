@@ -1,0 +1,29 @@
+[package]
+name = "ncknot"
+version = "0.1.0"
+edition = "2021"
+description = "Computational knot theory in safe Rust on ncalg: planar diagrams and braids, Kauffman bracket and Jones polynomial, Alexander and Conway polynomials, colorings and branched covers, signature, knot groups, Khovanov homology."
+readme = "README.md"
+rust-version = "1.82"
+keywords = ["knot", "topology", "jones", "khovanov", "braid"]
+categories = ["mathematics", "science"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/aidan-epperly/ncknot"
+
+[dependencies]
+ncalg = { git = "https://github.com/aidan-epperly/ncalg", default-features = false }
+num-traits = "0.2"
+num-integer = "0.1"
+num-bigint = "0.4"
+num-rational = "0.4"
+
+[features]
+default = ["parallel"]
+# ncalg's multithreaded faer kernels; turn off for WebAssembly
+parallel = ["ncalg/parallel"]
+
+[dev-dependencies]
+rand = "0.8"
+
+[profile.release]
+debug = 1
