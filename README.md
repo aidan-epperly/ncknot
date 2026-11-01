@@ -77,6 +77,9 @@ Operations: `mirror`, `reverse`, `disjoint_union`, `writhe`, `sign_counts`,
 | `group` | the Wirtinger presentation (`KnotGroup`) | `presentation`, `alexander_matrix`, `Presentation::fox_jacobian` |
 | `group().count_homomorphisms_to_symmetric(m, transitive)` | the number of homomorphisms to `S_m`, `m ≤ 10` | backtracking with relation propagation and conjugacy-class symmetry |
 | `khovanov(Ring::Fp(p))`, `khovanov(Ring::Integers)` | `Kh^{h,q}`: ranks, plus torsion over ℤ | the cube of resolutions, split by `q`; sparse ranks and invariant factors |
+| `khovanov_local(Ring::Fp(p))` | `Kh^{h,q}` over `𝔽_p` for much larger diagrams | Bar-Natan's local algorithm (`local_khovanov`): crossings added one at a time to a complex of tangles, delooping and Gaussian elimination after each |
+| `rasmussen_s()` | the Rasmussen invariant over ℚ (`local_khovanov::rasmussen_s_mod` over `𝔽_p`) | the same complex over `ℚ[h]` with `X² = hX`; the two free generators of degree 0 sit in quantum degrees `s ± 1` |
+| `simplify()` | a diagram with fewer crossings | removes kinks (R1) and bigons (R2) until none are left |
 
 `Khovanov` has `rank(h, q)`, `total_rank`, `euler_characteristic` (equal to
 `(q + q^{−1}) V` at `t^{1/2} = −q`) and `poincare` (as text).
@@ -174,15 +177,19 @@ Release timings, one core, from `examples/bench.rs`:
 | 4-braid, 12 crossings | | | | | 0.25 s | 0.44 s |
 
 Khovanov homology costs `2^n` states times `2^{circles}` generators.
-Comfortable sizes are up to about 14 crossings.
+Comfortable sizes are up to about 14 crossings.  The local algorithm's cost depends instead on how many ends of the
+partial tangle are open and how much homology the partial tangles carry:
+the table knots take milliseconds and `T(4,5)` 16 ms; a 28-crossing cabled
+knot about a second.
 
 ## Roadmap
 
 - HOMFLY-PT and Kauffman two-variable polynomials, through the Hecke /
   BMW algebras.  The quotient algebras are ncalg's, but they need
   rational-function coefficients.
-- Reidemeister simplification of diagrams.  Faster Khovanov through Bar-Natan's
-  local (tangle) algorithm.
+- Simplification by Reidemeister III moves and search, beyond `simplify`'s
+  R1 and R2.  A faster local Khovanov engine (its complexes of tangles are
+  large for cabled diagrams).
 - Seifert matrices, Tristram–Levine signatures, and the multivariable
   Alexander polynomial.
 - DT and Gauss codes as input; a larger knot table.

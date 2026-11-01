@@ -311,6 +311,74 @@ impl Diagram {
         comps
     }
 
+    /// A diagram of the same link with fewer crossings: removes kinks
+    /// (Reidemeister I) and bigons where one strand passes over the other
+    /// twice (Reidemeister II) until there are none.  Components that lose
+    /// all their crossings become crossingless loops.
+    pub fn simplify(&self) -> Diagram {
+        let mut code: Vec<[i64; 4]> = self.code_i64(|x, _| *x);
+        let mut free = self.free_loops;
+        loop {
+            // Reidemeister I: an edge from a slot to the next one
+            let kink = code.iter().position(|x| (0..4).any(|i| x[i] == x[(i + 1) % 4]));
+            if let Some(c) = kink {
+                let x = code.remove(c);
+                let i = (0..4).find(|&i| x[i] == x[(i + 1) % 4]).unwrap();
+                let (y, z) = (x[(i + 2) % 4], x[(i + 3) % 4]);
+                if y == z {
+                    free += 1;
+                } else {
+                    merge(&mut code, z, y);
+                }
+                continue;
+            }
+            let Ok(d) = Diagram::build(&code, free) else { break };
+            // Reidemeister II: a bigon with one edge over at both crossings
+            let mut done = false;
+            for face in d.faces() {
+                if face.len() != 2 || face[0].0 == face[1].0 {
+                    continue;
+                }
+                let (c1, k1) = face[0];
+                let c2 = face[1].0;
+                let x1 = code[c1];
+                let x2 = code[c2];
+                let edges = [x1[k1 as usize], x1[(k1 as usize + 1) % 4]];
+                let slot = |x: &[i64; 4], e: i64| (0..4).find(|&s| x[s] == e).unwrap();
+                let over = edges
+                    .iter()
+                    .copied()
+                    .find(|&e| slot(&x1, e) % 2 == 1 && slot(&x2, e) % 2 == 1);
+                let Some(e_over) = over else { continue };
+                let e_under = if edges[0] == e_over { edges[1] } else { edges[0] };
+                if slot(&x1, e_under) % 2 != 0 || slot(&x2, e_under) % 2 != 0 {
+                    continue;
+                }
+                // the far ends of the two strands
+                let a = x1[(slot(&x1, e_over) + 2) % 4];
+                let b = x2[(slot(&x2, e_over) + 2) % 4];
+                let u1 = x1[(slot(&x1, e_under) + 2) % 4];
+                let u2 = x2[(slot(&x2, e_under) + 2) % 4];
+                let (hi, lo) = (c1.max(c2), c1.min(c2));
+                code.remove(hi);
+                code.remove(lo);
+                for (p, q) in [(a, b), (u1, u2)] {
+                    if p == q {
+                        free += 1;
+                    } else {
+                        merge(&mut code, q, p);
+                    }
+                }
+                done = true;
+                break;
+            }
+            if !done {
+                break;
+            }
+        }
+        Diagram::build(&code, free).unwrap_or_else(|_| self.clone())
+    }
+
     /// Numbers of positive and negative crossings `(n₊, n₋)`.
     pub fn sign_counts(&self) -> (usize, usize) {
         let p = (0..self.crossings()).filter(|&c| self.sign(c) > 0).count();
@@ -449,5 +517,16 @@ impl Diagram {
     /// Is the projection (without its crossingless loops) connected?
     pub fn is_connected_projection(&self) -> bool {
         self.projection_pieces() <= 1
+    }
+}
+
+/// Renames edge label `from` to `to` (two edges joined into one).
+fn merge(code: &mut [[i64; 4]], from: i64, to: i64) {
+    for x in code.iter_mut() {
+        for l in x.iter_mut() {
+            if *l == from {
+                *l = to;
+            }
+        }
     }
 }

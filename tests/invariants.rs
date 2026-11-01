@@ -316,3 +316,28 @@ fn seifert_circles_and_graph() {
     assert_eq!(lh.seifert_circles().1, 2);
     assert_eq!(lh.seifert_graph_components(Some(-1)), 1);
 }
+
+#[test]
+fn simplify_keeps_the_knot() {
+    // σ1 σ2 σ2⁻¹ σ1 σ1: the bigon goes, the trefoil stays
+    let d = Braid::new(3, &[1, 2, -2, 1, 1]).unwrap().closure();
+    let s = d.simplify();
+    assert!(s.crossings() < d.crossings());
+    assert_eq!(s.jones(), d.jones());
+    // a kink alone is the unknot
+    let k = Diagram::parse_pd("X[1,1,2,2]").unwrap().simplify();
+    assert_eq!(k.crossings(), 0);
+    assert_eq!(k.components(), 1);
+    // random braids with cancelling pairs inserted
+    let mut rng = StdRng::seed_from_u64(5);
+    for _ in 0..20 {
+        let mut w: Vec<i32> = (0..6).map(|_| if rng.gen_bool(0.5) { 1 } else { -2 }).collect();
+        let at = rng.gen_range(0..w.len());
+        w.insert(at, 2);
+        w.insert(at + 1, -2);
+        let d = Braid::new(3, &w).unwrap().closure();
+        let s = d.simplify();
+        assert_eq!(s.jones(), d.jones(), "{w:?}");
+        assert_eq!(s.components(), d.components());
+    }
+}

@@ -10,7 +10,9 @@
 //! * [`signature`] — Goeritz matrix and signature (Gordon–Litherland);
 //! * [`group`] — Wirtinger presentations, Fox calculus, counting
 //!   homomorphisms to symmetric groups;
-//! * [`khovanov`] — Khovanov homology over `𝔽_p` and `ℤ`.
+//! * [`khovanov`] — Khovanov homology over `𝔽_p` and `ℤ`;
+//!   [`local_khovanov`] — Khovanov homology and the Rasmussen invariant by
+//!   Bar-Natan's local algorithm, for large diagrams.
 //! * [`kirby`] — Kirby diagrams of infinite families: bundles of `n`
 //!   strands and twist boxes with `m` half-twists, with linking numbers and
 //!   framings as polynomials in the parameters ([`param`]), 1-/2-handle
@@ -45,6 +47,7 @@ pub mod group;
 pub mod khovanov;
 pub mod kirby;
 pub mod laurent;
+pub mod local_khovanov;
 pub mod param;
 pub mod signature;
 pub mod table;
@@ -99,5 +102,14 @@ impl Diagram {
     /// Khovanov homology over `ring` ([`khovanov::khovanov`]).
     pub fn khovanov(&self, ring: Ring) -> Result<Khovanov> {
         khovanov::khovanov(self, ring)
+    }
+    /// Khovanov homology over `𝔽_p` by Bar-Natan's local algorithm
+    /// ([`local_khovanov::khovanov`]), for much larger diagrams.
+    pub fn khovanov_local(&self, ring: Ring) -> Result<Khovanov> {
+        local_khovanov::khovanov(self, ring)
+    }
+    /// The Rasmussen invariant over ℚ ([`local_khovanov::rasmussen_s`]).
+    pub fn rasmussen_s(&self) -> Result<i64> {
+        local_khovanov::rasmussen_s(self)
     }
 }
