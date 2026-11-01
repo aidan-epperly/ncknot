@@ -14,6 +14,7 @@ front end is [ncknot-web](https://github.com/aidan-epperly/ncknot-web).
 - [Quick start](#quick-start)
 - [Diagrams](#diagrams)
 - [Invariants](#invariants)
+- [Kirby diagrams of families](#kirby-diagrams-of-families)
 - [Conventions](#conventions)
 - [What ncalg provides](#what-ncalg-provides)
 - [Examples, tests and timings](#examples-tests-and-timings)
@@ -81,6 +82,32 @@ Operations: `mirror`, `reverse`, `disjoint_union`, `writhe`, `sign_counts`,
 `Laurent<C>` is the polynomial type throughout: Laurent polynomials over any
 ncalg `Coeff`, with exact division and evaluation.
 
+## Kirby diagrams of families
+
+`kirby::KirbyDiagram` describes a whole family of Kirby diagrams at once,
+the way they are drawn by hand: bundles of `n` parallel strands and twist
+boxes of `m` half-twists, where `n` and `m` are parameters.  It is a planar
+graph whose edges are cables (ordered bundles of strands, each of one handle,
+with a width that is a polynomial in the parameters, `param::Poly`) and
+whose nodes are crossings of two cables, twist boxes (`Δ^e` on single strands
+or on flat ribbons) and splittings of a cable.  Handles are dotted circles
+(1-handles) or 2-handles with polynomial framings.  Parameters can be
+declared odd or even.
+
+| method | what |
+|---|---|
+| `linking()` | linking numbers and writhes, as polynomials in the parameters |
+| `linking_matrix()` | framings on the diagonal, `0` for dotted circles |
+| `cancel(dotted, h)` | cancels a dotted circle against a 2-handle `h` through it once.  First every other strand through the circle slides over `h` (becoming a parallel copy of `h`'s arc, twisted to `h`'s framing), then both handles are erased.  It acts on whole bundles, so the result holds for every member.  New framings by homology, `f' = f − 2k·lk(X, h) + k²·f_h` |
+| `expand(values)` | one member as an ordinary `Diagram`, with the handle of each component |
+| `check(values)` | the symbolic linking numbers and writhes against the expanded member |
+
+`KnotGroup::surgery_relators(d, framings)` adds the relations `λ μ^f` of
+Dehn surgery to the link group, and `count_homomorphisms_with` counts
+homomorphisms of the resulting 3-manifold group to `S_m`.  Kirby moves keep
+the boundary 3-manifold, so these counts must agree before and after a move.
+The tests use them to check the cancellation (`tests/kirby.rs`).
+
 ## Conventions
 
 - **PD codes.** `X[a, b, c, d]` lists edges counterclockwise from the incoming
@@ -124,7 +151,11 @@ ncalg `Coeff`, with exact division and evaluation.
     stabilization, inserting `σσ^{−1}`);
   - the Khovanov Euler characteristic equals the Jones polynomial over
     `𝔽_2`, `𝔽_3` and ℤ;
-  - mirror images, reversal and split unions behave as they should.
+  - mirror images, reversal and split unions behave as they should;
+  - for a two-parameter Kirby family, the symbolic linking numbers and
+    writhes match every expanded member, and cancelling its 1-handle keeps
+    the boundary's homomorphism counts to `S_3` and `S_4`; `±1` and `+5`
+    surgery on the trefoil give the Poincaré sphere, `Σ(2,3,7)` and `L(5,4)`.
 
 Release timings, one core, from `examples/bench.rs`:
 

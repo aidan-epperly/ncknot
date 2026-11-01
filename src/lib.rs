@@ -11,6 +11,11 @@
 //! * [`group`] — Wirtinger presentations, Fox calculus, counting
 //!   homomorphisms to symmetric groups;
 //! * [`khovanov`] — Khovanov homology over `𝔽_p` and `ℤ`.
+//! * [`kirby`] — Kirby diagrams of infinite families: bundles of `n`
+//!   strands and twist boxes with `m` half-twists, with linking numbers and
+//!   framings as polynomials in the parameters ([`param`]), 1-/2-handle
+//!   cancellation done on whole bundles, and expansion of any member to an
+//!   ordinary diagram.
 //!
 //! The exact algebra is ncalg's: Bareiss determinants and the inertia of
 //! symmetric matrices over ℚ (`linalg::exact`), ranks over `𝔽_p` (`ff`,
@@ -38,7 +43,9 @@ pub mod diagram;
 pub mod error;
 pub mod group;
 pub mod khovanov;
+pub mod kirby;
 pub mod laurent;
+pub mod param;
 pub mod signature;
 pub mod table;
 

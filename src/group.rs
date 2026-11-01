@@ -144,6 +144,59 @@ impl KnotGroup {
     /// one link component run over one conjugacy class, and the first
     /// generator only over class representatives.
     pub fn count_homomorphisms_to_symmetric(&self, m: usize, transitive_only: bool) -> BigInt {
+        self.count_homomorphisms_with(&[], m, transitive_only)
+    }
+
+    /// Relators that turn the link group into the fundamental group of the
+    /// 3-manifold from surgery on the link with these framings (one per
+    /// component, free loops last): `λ_c μ_c^{f_c}` for each component `c`,
+    /// with `λ_c` the longitude of linking number 0 with `c`.  Going along
+    /// `c` from the arc `μ_c`, passing under arcs `x_{k_1}, …, x_{k_N}` at
+    /// crossings of signs `ε_j`, gives the peripheral element
+    /// `x_{k_N}^{ε_N} ⋯ x_{k_1}^{ε_1}`; it equals `λ_c μ_c^{w_c}`, `w_c` the
+    /// writhe of `c`.
+    pub fn surgery_relators(d: &Diagram, framings: &[i64]) -> Vec<Vec<i32>> {
+        assert_eq!(framings.len(), d.components());
+        let (arc, n_arcs) = arcs(d);
+        let n_cross = d.components() - d.free_loops();
+        let mut out = Vec::new();
+        let power = |g: usize, k: i64| -> Vec<i32> {
+            let l = g as i32 + 1;
+            std::iter::repeat_n(if k > 0 { l } else { -l }, k.unsigned_abs() as usize).collect()
+        };
+        for c in 0..n_cross {
+            let edges: Vec<usize> = (0..d.edges()).filter(|&e| d.edge_component(e) == c).collect();
+            let mut word = Vec::new();
+            for &e in &edges {
+                let (x, slot) = d.edge_ends(e)[1];
+                if slot == 0 {
+                    let over = arc[d.crossing(x)[1]] as i32 + 1;
+                    word.push(over * d.sign(x) as i32);
+                }
+            }
+            word.reverse();
+            let writhe: i64 = (0..d.crossings())
+                .filter(|&x| {
+                    let k = d.crossing(x);
+                    d.edge_component(k[0]) == c && d.edge_component(k[1]) == c
+                })
+                .map(|x| d.sign(x))
+                .sum();
+            word.extend(power(arc[edges[0]], framings[c] - writhe));
+            out.push(word);
+        }
+        for j in 0..d.free_loops() {
+            out.push(power(n_arcs + j, framings[n_cross + j]));
+        }
+        out
+    }
+
+    /// The number of homomorphisms to `S_m` that also kill the words in
+    /// `extra` (letters as in [`Presentation`]); see
+    /// [`count_homomorphisms_to_symmetric`](Self::count_homomorphisms_to_symmetric).
+    /// With [`surgery_relators`](Self::surgery_relators) this counts
+    /// homomorphisms from the fundamental group of a surgered 3-manifold.
+    pub fn count_homomorphisms_with(&self, extra: &[Vec<i32>], m: usize, transitive_only: bool) -> BigInt {
         assert!((1..=MAX_DEGREE).contains(&m), "S_m with 1 ≤ m ≤ {MAX_DEGREE}");
         let n = self.presentation.generators;
         if n == 0 {
@@ -165,6 +218,7 @@ impl KnotGroup {
             trail: Vec::new(),
             m,
             transitive_only,
+            extra,
             classes: all.iter().map(|p| cycle_type(p, m)).collect(),
             all,
         };
@@ -189,6 +243,7 @@ struct Search<'a> {
     trail: Vec<usize>,
     m: usize,
     transitive_only: bool,
+    extra: &'a [Vec<i32>],
     all: Vec<Perm>,
     classes: Vec<Vec<usize>>,
 }
@@ -228,6 +283,21 @@ impl Search<'_> {
         true
     }
 
+    fn word_is_identity(&self, w: &[i32]) -> bool {
+        let mut p = identity();
+        for &l in w {
+            let x = self.img[l.unsigned_abs() as usize - 1].unwrap();
+            let x = if l > 0 { x } else { inverse(&x, self.m) };
+            // p ∘ x
+            let mut q = identity();
+            for i in 0..self.m {
+                q[i] = p[x[i] as usize];
+            }
+            p = q;
+        }
+        p == identity()
+    }
+
     fn undo(&mut self, mark: usize) {
         for g in self.trail.drain(mark..) {
             self.img[g] = None;
@@ -253,7 +323,9 @@ impl Search<'_> {
             }
         }
         let Some((g, _)) = best else {
-            return u64::from(!self.transitive_only || is_transitive(&self.img, self.m));
+            let ok = (!self.transitive_only || is_transitive(&self.img, self.m))
+                && self.extra.iter().all(|w| self.word_is_identity(w));
+            return u64::from(ok);
         };
         // generators of one component are conjugate: same cycle type
         let class = (0..n)
@@ -301,6 +373,14 @@ fn conjugate(k: &Perm, x: &Perm, s: i64, m: usize) -> Perm {
         }
     }
     out
+}
+
+fn inverse(p: &Perm, m: usize) -> Perm {
+    let mut q = identity();
+    for i in 0..m {
+        q[p[i] as usize] = i as u8;
+    }
+    q
 }
 
 fn cycle_type(p: &Perm, m: usize) -> Vec<usize> {
