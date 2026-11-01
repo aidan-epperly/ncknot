@@ -341,3 +341,111 @@ fn simplify_keeps_the_knot() {
         assert_eq!(s.components(), d.components());
     }
 }
+
+#[test]
+fn reidemeister_three() {
+    // every R3 move keeps the link: random braids, all their triangular faces
+    let mut rng = StdRng::seed_from_u64(11);
+    let mut moves = 0;
+    for t in 0..40 {
+        let d = random_braid(&mut rng, 3 + t % 3, 6 + t % 7).closure();
+        let (v, a, sig) = (d.jones(), d.alexander(), d.signature().unwrap());
+        for f in d.r3_faces() {
+            let e = d.r3(&f).expect("a move at an R3 face");
+            assert_eq!(e.crossings(), d.crossings());
+            assert_eq!(e.jones(), v, "{:?}", d.pd_code());
+            assert_eq!(e.alexander(), a);
+            assert_eq!(e.signature().unwrap(), sig);
+            assert_eq!(e.linking_matrix(), d.linking_matrix());
+            // the move is undone at the new triangle
+            assert!(e
+                .r3_faces()
+                .iter()
+                .any(|g| e.r3(g).is_some_and(|h| h.jones() == v)));
+            moves += 1;
+        }
+    }
+    assert!(moves > 50, "only {moves} moves tested");
+    // σ1σ2σ1 = σ2σ1σ2: the closure of σ1σ2σ1σ2⁻¹σ1⁻¹σ2⁻¹ is the 3-component
+    // unlink, though no kink or bigon shows before an R3 move
+    let d = Braid::new(3, &[1, 2, 1, -2, -1, -2]).unwrap().closure();
+    let s = d.simplify();
+    assert_eq!((s.crossings(), s.free_loops()), (0, 3));
+    // random braids with a braid relation inserted reduce to the same size
+    for _ in 0..20 {
+        let b = random_braid(&mut rng, 3, 5);
+        let mut w: Vec<i32> = b.word().to_vec();
+        let base = b.closure().simplify().crossings();
+        let at = rng.gen_range(0..=w.len());
+        w.splice(at..at, [1, 2, 1, -2, -1, -2]);
+        let d = Braid::new(3, &w).unwrap().closure();
+        let s = d.simplify();
+        assert_eq!(s.jones(), d.jones(), "{w:?}");
+        assert!(s.crossings() <= base, "{w:?}: {} > {base}", s.crossings());
+    }
+}
+
+#[test]
+fn reidemeister_two_up_and_global_simplify() {
+    let mut rng = StdRng::seed_from_u64(12);
+    let mut moves = 0;
+    for t in 0..30 {
+        let d = random_braid(&mut rng, 3 + t % 3, 5 + t % 6).closure();
+        let (v, a) = (d.jones(), d.alexander());
+        for f in d.faces().iter().filter(|f| f.len() >= 2) {
+            for i in 0..f.len() {
+                for j in 0..f.len() {
+                    for over in [true, false] {
+                        let Some(e) = d.r2_up(f, i, j, over) else { continue };
+                        assert_eq!(e.crossings(), d.crossings() + 2);
+                        assert_eq!(e.jones(), v, "{:?} face {f:?} {i} {j} {over}", d.pd_code());
+                        assert_eq!(e.alexander(), a);
+                        assert_eq!(e.linking_matrix(), d.linking_matrix());
+                        moves += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(moves > 500, "only {moves} moves tested");
+    // global simplification keeps the knot and never does worse
+    for t in 0..15 {
+        let d = random_braid(&mut rng, 3 + t % 2, 10).closure();
+        let (s, g) = (d.simplify(), d.simplify_global(5));
+        assert!(g.crossings() <= s.crossings());
+        assert_eq!(g.jones(), d.jones());
+        assert_eq!(g.components(), d.components());
+    }
+}
+
+#[test]
+fn strand_pickup() {
+    let mut rng = StdRng::seed_from_u64(13);
+    let mut moves = 0;
+    for t in 0..200 {
+        let d = random_braid(&mut rng, 3 + t % 4, 6 + t % 12).closure();
+        let Some(e) = d.pickup() else { continue };
+        assert!(e.crossings() < d.crossings());
+        assert_eq!(e.jones(), d.jones(), "{:?}", d.pd_code());
+        assert_eq!(e.alexander(), d.alexander());
+        if e.is_connected_projection() {
+            assert_eq!(e.signature().unwrap(), d.signature().unwrap());
+        }
+        // linking numbers, up to the order of the components
+        let sorted = |m: Vec<Vec<i64>>| {
+            let mut rows: Vec<Vec<i64>> = m
+                .into_iter()
+                .map(|mut r| {
+                    r.sort();
+                    r
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(sorted(e.linking_matrix()), sorted(d.linking_matrix()));
+        assert_eq!(e.components(), d.components());
+        moves += 1;
+    }
+    assert!(moves > 30, "only {moves} pickups tested");
+}

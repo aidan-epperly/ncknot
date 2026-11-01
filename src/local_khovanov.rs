@@ -758,6 +758,35 @@ fn crossing_order(d: &Diagram) -> Vec<usize> {
     beam_order(d, 256)
 }
 
+/// A diagram of the same link to run the local algorithm on: of
+/// [`Diagram::simplify`] and [`Diagram::simplify_global`] (10 rounds), the
+/// one with the cheaper crossing order ([`order_cost`]).  Fewer crossings do
+/// not always mean a faster computation.
+pub fn simplify_for_local(d: &Diagram) -> Diagram {
+    let (a, b) = (d.simplify(), d.simplify_global(10));
+    if order_cost(&b).0 < order_cost(&a).0 {
+        b
+    } else {
+        a
+    }
+}
+
+/// The cost of the crossing order the local algorithm uses on `d`: the
+/// total of `2^{open ends}` over the steps, and the most ends open at once.
+/// Of two diagrams of a knot, the one with the smaller total is usually the
+/// faster to compute with.
+pub fn order_cost(d: &Diagram) -> (f64, usize) {
+    let mut done = vec![false; d.crossings()];
+    let (mut total, mut most) = (0.0, 0);
+    for c in crossing_order(d) {
+        done[c] = true;
+        let k = open_ends(d, &done);
+        total += (2f64).powi(k as i32);
+        most = most.max(k);
+    }
+    (total, most)
+}
+
 /// Open ends after adding the crossings in `done` (edges seen once).
 fn open_ends(d: &Diagram, done: &[bool]) -> usize {
     let mut seen: HashMap<usize, u32> = HashMap::new();

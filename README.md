@@ -79,7 +79,8 @@ Operations: `mirror`, `reverse`, `disjoint_union`, `writhe`, `sign_counts`,
 | `khovanov(Ring::Fp(p))`, `khovanov(Ring::Integers)` | `Kh^{h,q}`: ranks, plus torsion over ℤ | the cube of resolutions, split by `q`; sparse ranks and invariant factors |
 | `khovanov_local(Ring::Fp(p))` | `Kh^{h,q}` over `𝔽_p` for much larger diagrams | Bar-Natan's local algorithm (`local_khovanov`): crossings added one at a time to a complex of tangles, delooping and Gaussian elimination after each |
 | `rasmussen_s()` | the Rasmussen invariant over ℚ (`local_khovanov::rasmussen_s_mod` over `𝔽_p`) | the same complex over `ℚ[h]` with `X² = hX`; the two free generators of degree 0 sit in quantum degrees `s ± 1` |
-| `simplify()` | a diagram with fewer crossings | removes kinks (R1) and bigons (R2) until none are left |
+| `simplify()` | a diagram with fewer crossings | kinks (R1) and bigons (R2) removed, strands that pass only over or only under rerouted along shortest paths (`pickup`), and a random walk of Reidemeister III moves (`r3`) looking for more; `simplify_basic` does R1 and R2 only |
+| `simplify_global(rounds)` | usually fewer still | `simplify` with backtracking: random moves that add two crossings (`r2_up`), then `simplify` again |
 
 `Khovanov` has `rank(h, q)`, `total_rank`, `euler_characteristic` (equal to
 `(q + q^{−1}) V` at `t^{1/2} = −q`) and `poincare` (as text).
@@ -184,15 +185,17 @@ knot about a second.  For `s` of large knots use `rasmussen_s_mod` with
 `p = 2³¹ − 1`, which is much faster than ℚ, where the coefficients grow.
 Over that field (on 16 threads, with the `parallel` feature) a 52-crossing
 cabled knot takes about 4 seconds, and cabled knots of 80 to 90 crossings a
-few minutes and about 1 GB.
+few minutes and about 1 GB.  Simplify first, with
+`local_khovanov::simplify_for_local`: it picks whichever of `simplify` and
+`simplify_global` gives the cheaper crossing order (`order_cost`), and on
+cabled knots of 50 to 90 crossings that cuts the time by 3 to 180 times.
+Fewer crossings alone do not always help.
 
 ## Roadmap
 
 - HOMFLY-PT and Kauffman two-variable polynomials, through the Hecke /
   BMW algebras.  The quotient algebras are ncalg's, but they need
   rational-function coefficients.
-- Simplification by Reidemeister III moves and search, beyond `simplify`'s
-  R1 and R2.
 - Seifert matrices, Tristram–Levine signatures, and the multivariable
   Alexander polynomial.
 - DT and Gauss codes as input; a larger knot table.

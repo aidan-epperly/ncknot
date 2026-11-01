@@ -311,11 +311,460 @@ impl Diagram {
         comps
     }
 
-    /// A diagram of the same link with fewer crossings: removes kinks
+    /// A diagram of the same link with fewer crossings.  Removes kinks
     /// (Reidemeister I) and bigons where one strand passes over the other
-    /// twice (Reidemeister II) until there are none.  Components that lose
-    /// all their crossings become crossingless loops.
+    /// twice (Reidemeister II), and reroutes strands that pass only over or
+    /// only under along shorter paths ([`Self::pickup`]); then searches for
+    /// more of these through Reidemeister III moves, made at random from a
+    /// fixed seed (so the result is reproducible), keeping the smallest
+    /// diagram met.  The search
+    /// stops after `20 n` moves (`n` crossings, at least 10) without a new
+    /// smallest diagram.  Components that lose all their crossings become
+    /// crossingless loops.
     pub fn simplify(&self) -> Diagram {
+        let mut cur = self.reduce();
+        let mut best = cur.clone();
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut stale = 0;
+        while stale < 20 * best.crossings().max(10) {
+            let moves = cur.r3_faces();
+            if moves.is_empty() {
+                break;
+            }
+            // xorshift64
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            stale += 1;
+            let Some(next) = cur.r3(&moves[(rng % moves.len() as u64) as usize]) else {
+                continue;
+            };
+            cur = next.reduce();
+            if cur.crossings() < best.crossings() {
+                best = cur.clone();
+                stale = 0;
+            }
+        }
+        best
+    }
+
+    /// The triangular faces at which a Reidemeister III move can be made:
+    /// three distinct crossings, and strands not cyclically over one another.
+    pub fn r3_faces(&self) -> Vec<Vec<Corner>> {
+        self.faces()
+            .into_iter()
+            .filter(|f| {
+                f.len() == 3 && f[0].0 != f[1].0 && f[1].0 != f[2].0 && f[0].0 != f[2].0 && !self.r3_cyclic(f)
+            })
+            .collect()
+    }
+
+    /// The Reidemeister III move at a triangular face (from [`Self::faces`]),
+    /// or `None` if the face is not one.
+    ///
+    /// Number the face's sides `e₁, e₂, e₃` in the order the face lists its
+    /// corners, and the strands along them 1, 2, 3; crossing `cᵢ` joins
+    /// sides `eᵢ₋₁` and `eᵢ`.  Strand `i` runs from its outer end `Pᵢ` at
+    /// `cᵢ` to its outer end `Qᵢ` at `cᵢ₊₁`.  Counterclockwise around the
+    /// triangle the outer ends are `P₁ Q₃ | P₂ Q₁ | P₃ Q₂` (two at each
+    /// crossing).  The move slides one strand across the opposite crossing:
+    /// afterwards strands `i` and `j` cross next to the two outer ends that
+    /// neither of them had at their old crossing, over and under as before,
+    /// so the order of the crossings along each strand is reversed.
+    pub fn r3(&self, face: &[Corner]) -> Option<Diagram> {
+        let &[(c1, k1), (c2, k2), (c3, k3)] = face else {
+            return None;
+        };
+        if c1 == c2 || c2 == c3 || c1 == c3 {
+            return None;
+        }
+        let slot = |c: usize, k: u8, d: u8| self.x[c][((k + d) % 4) as usize] as i64;
+        let (e1, e2, e3) = (slot(c1, k1, 0), slot(c2, k2, 0), slot(c3, k3, 0));
+        let (p1, q3) = (slot(c1, k1, 2), slot(c1, k1, 3));
+        let (p2, q1) = (slot(c2, k2, 2), slot(c2, k2, 3));
+        let (p3, q2) = (slot(c3, k3, 2), slot(c3, k3, 3));
+        // over/under: a strand is over where it sits in odd slots; side eᵢ
+        // leaves cᵢ by slot kᵢ and enters cᵢ₊₁ by slot kᵢ₊₁ + 1
+        let o13 = k1 % 2 == 1; // strand 1 over strand 3, at c1
+        let o12 = (k2 + 1) % 2 == 1; // strand 1 over strand 2, at c2
+        let o23 = (k3 + 1) % 2 == 1; // strand 2 over strand 3, at c3
+        if self.r3_cyclic(face) {
+            return None;
+        }
+        // orientation: strand i runs P → Q when side eᵢ leaves cᵢ
+        let fwd = |e: i64, c: usize, k: u8| self.ends[e as usize][0] == (c, k);
+        let (f1, f2, f3) = (fwd(e1, c1, k1), fwd(e2, c2, k2), fwd(e3, c3, k3));
+        // the new crossings: arms counterclockwise as (label, strand, incoming)
+        let n13 = [(q1, 1, !f1), (p3, 3, f3), (e1, 1, f1), (e3, 3, !f3)];
+        let n12 = [(q2, 2, !f2), (p1, 1, f1), (e2, 2, f2), (e1, 1, !f1)];
+        let n23 = [(q3, 3, !f3), (p2, 2, f2), (e3, 3, f3), (e2, 2, !f2)];
+        // KnotTheory's order: from the incoming under-strand
+        let pd = |arms: [(i64, u8, bool); 4], under: u8| -> [i64; 4] {
+            let s = (0..4).find(|&s| arms[s].1 == under && arms[s].2).unwrap();
+            [0, 1, 2, 3].map(|i| arms[(s + i) % 4].0)
+        };
+        let mut code = self.code_i64(|x, _| *x);
+        code[c1] = pd(n13, if o13 { 3 } else { 1 });
+        code[c2] = pd(n12, if o12 { 2 } else { 1 });
+        code[c3] = pd(n23, if o23 { 3 } else { 2 });
+        Diagram::build(&code, self.free_loops).ok()
+    }
+
+    /// [`Self::simplify`], with backtracking to get out of local minima: from
+    /// the smallest diagram so far, a few random moves that add crossings
+    /// ([`Self::r2_up`]), then `simplify` again; the result is kept when it is
+    /// smaller.  Stops after `rounds` rounds without a smaller diagram (10 is
+    /// a good default).  Reproducible, like `simplify`.
+    pub fn simplify_global(&self, rounds: usize) -> Diagram {
+        let mut best = self.simplify();
+        let mut rng: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut stale = 0;
+        while stale < rounds && best.crossings() > 0 {
+            stale += 1;
+            let mut d = best.clone();
+            for _ in 0..1 + next() % 10 {
+                let faces: Vec<Vec<Corner>> = d.faces().into_iter().filter(|f| f.len() >= 2).collect();
+                let f = &faces[(next() % faces.len() as u64) as usize];
+                let (i, j) = (
+                    (next() % f.len() as u64) as usize,
+                    (next() % f.len() as u64) as usize,
+                );
+                if let Some(e) = d.r2_up(f, i, j, next() % 2 == 0) {
+                    d = e;
+                }
+            }
+            let d = d.simplify();
+            if d.crossings() < best.crossings() {
+                best = d;
+                stale = 0;
+            }
+        }
+        best
+    }
+
+    /// The Reidemeister II move that adds two crossings: in a face (from
+    /// [`Self::faces`]), a finger of side `i` is pushed across side `j`
+    /// (`i ≠ j`), over it if `over` and under it otherwise.  Side `i` is the
+    /// edge leaving the face's corner `i`.  `None` if `i = j` or the result
+    /// is not a valid diagram.
+    ///
+    /// With the face on the left, side `e` runs `A → B` and side `f` runs
+    /// `C → D`.  The finger leaves `e`, crosses `f` at `X`, turns and crosses
+    /// back at `Y`; along `e` the pieces are `e_a, e_mid, e_b`, and along `f`
+    /// (which meets `Y` first) `f_a, f_mid, f_b`.  Counterclockwise, `X` has
+    /// `e_a, f_mid, e_mid, f_b` and `Y` has `e_b, f_a, e_mid, f_mid`.
+    pub fn r2_up(&self, face: &[Corner], i: usize, j: usize, over: bool) -> Option<Diagram> {
+        let n = face.len();
+        if i == j || i >= n || j >= n {
+            return None;
+        }
+        let (a, ka) = face[i];
+        let (b, kb) = face[(i + 1) % n];
+        let (c, kc) = face[j];
+        let (d, kd) = face[(j + 1) % n];
+        let e = self.x[a][ka as usize];
+        let f = self.x[c][kc as usize];
+        if e == f {
+            return None;
+        }
+        // orientation: forward when the edge leaves its corner's crossing
+        let ef = self.ends[e][0] == (a, ka);
+        let ff = self.ends[f][0] == (c, kc);
+        let mut code = self.code_i64(|x, _| *x);
+        let top = 2 * self.crossings() as i64;
+        let (e_a, e_mid, e_b) = (e as i64, top, top + 1);
+        let (f_a, f_mid, f_b) = (f as i64, top + 2, top + 3);
+        // the far ends of e and f take their new labels
+        code[b][((kb + 1) % 4) as usize] = e_b;
+        code[d][((kd + 1) % 4) as usize] = f_b;
+        // arms counterclockwise as (label, on e, incoming)
+        let xs = [
+            (e_a, true, ef),
+            (f_mid, false, ff),
+            (e_mid, true, !ef),
+            (f_b, false, !ff),
+        ];
+        let ys = [
+            (e_b, true, !ef),
+            (f_a, false, ff),
+            (e_mid, true, ef),
+            (f_mid, false, !ff),
+        ];
+        let pd = |arms: [(i64, bool, bool); 4]| -> [i64; 4] {
+            // the under-strand is f when e passes over
+            let s = (0..4).find(|&s| arms[s].1 != over && arms[s].2).unwrap();
+            [0, 1, 2, 3].map(|t| arms[(s + t) % 4].0)
+        };
+        code.push(pd(xs));
+        code.push(pd(ys));
+        Diagram::build(&code, self.free_loops).ok()
+    }
+
+    /// Strand pickup: the over-arc (a run of a component between two
+    /// under-passes, passing over everything in between) or under-arc whose
+    /// rerouting saves the most crossings, lifted off and laid back along a
+    /// shortest path through the faces of the rest; `None` if no arc can be
+    /// shortened.  An arc that passes over (under) everything it meets can go
+    /// anywhere, so the link is unchanged.
+    pub fn pickup(&self) -> Option<Diagram> {
+        let over = self.pickup_over();
+        let under = self.mirror().pickup_over().map(|d| d.mirror());
+        match (over, under) {
+            (Some(a), Some(b)) => Some(if b.crossings() < a.crossings() { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// [`Self::pickup`] for over-arcs only.
+    fn pickup_over(&self) -> Option<Diagram> {
+        let n = self.crossings();
+        let m = self.edges();
+        if n == 0 {
+            return None;
+        }
+        // the faces on the left and right of each edge (in its direction)
+        let faces = self.faces();
+        let (mut left, mut right) = (vec![0; m], vec![0; m]);
+        for (fi, f) in faces.iter().enumerate() {
+            for &(c, k) in f {
+                let l = self.x[c][k as usize];
+                if self.ends[l][0] == (c, k) {
+                    left[l] = fi;
+                } else {
+                    right[l] = fi;
+                }
+            }
+        }
+        let next_edge = |e: usize| {
+            let (c, s) = self.ends[e][1];
+            self.x[c][((s + 2) % 4) as usize]
+        };
+        let is_under_head = |e: usize| self.ends[e][1].1 % 2 == 0;
+        // the over-arcs: edges a₀ … a_k, a₀ leaving an under-pass and a_k
+        // entering the next one, over k crossings between
+        let mut arcs: Vec<Vec<usize>> = Vec::new();
+        let mut seen = vec![false; m];
+        for e0 in 0..m {
+            if seen[e0] || !is_under_head(e0) {
+                continue;
+            }
+            // e0 ends at an under-pass: walk the component from there
+            let mut e = e0;
+            loop {
+                seen[e] = true;
+                let mut arc = vec![next_edge(e)];
+                while !is_under_head(*arc.last().unwrap()) {
+                    let l = next_edge(*arc.last().unwrap());
+                    arc.push(l);
+                }
+                e = *arc.last().unwrap();
+                if arc.len() >= 2 {
+                    arcs.push(arc);
+                }
+                if e == e0 {
+                    break;
+                }
+            }
+        }
+        let mut best: Option<(usize, Diagram)> = None;
+        for arc in &arcs {
+            let k = arc.len() - 1;
+            if best.as_ref().is_some_and(|(saved, _)| *saved >= k) {
+                continue;
+            }
+            if let Some((len, d)) = self.reroute(arc, &left, &right, faces.len()) {
+                if len < k && best.as_ref().is_none_or(|(saved, _)| k - len > *saved) {
+                    best = Some((k - len, d));
+                }
+            }
+        }
+        best.map(|(_, d)| d)
+    }
+
+    /// Lifts the over-arc `arc` (edges `a₀ … a_k`) and lays it back along a
+    /// shortest path in the dual graph of the rest: the new length and the
+    /// diagram.  `None` if that is no shorter, or lifting it leaves a
+    /// crossingless loop.
+    fn reroute(
+        &self,
+        arc: &[usize],
+        left: &[usize],
+        right: &[usize],
+        nfaces: usize,
+    ) -> Option<(usize, Diagram)> {
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                r = p[r];
+            }
+            p[x] = r;
+            r
+        }
+        let k = arc.len() - 1;
+        let lifted: Vec<usize> = arc[..k].iter().map(|&a| self.ends[a][1].0).collect();
+        let mut removed = vec![false; self.crossings()];
+        let ends_at = [self.ends[arc[0]][0].0, self.ends[arc[k]][1].0];
+        for &c in &lifted {
+            // the arc passes over one crossing twice, or over its own end
+            if removed[c] || ends_at.contains(&c) {
+                return None;
+            }
+            removed[c] = true;
+        }
+        let in_arc: std::collections::HashSet<usize> = arc.iter().copied().collect();
+        // faces of the rest: merged across the arc's edges
+        let mut fp: Vec<usize> = (0..nfaces).collect();
+        for &a in arc {
+            let (u, v) = (find(&mut fp, left[a]), find(&mut fp, right[a]));
+            fp[u] = v;
+        }
+        // the head of an edge once the lifted crossings are gone (following
+        // the under-strand through them); None if it closes into a loop
+        let head = |mut l: usize| -> Option<(usize, u8)> {
+            for _ in 0..=self.crossings() {
+                let (c, s) = self.ends[l][1];
+                if !removed[c] {
+                    return Some((c, s));
+                }
+                l = self.x[c][((s + 2) % 4) as usize];
+            }
+            None
+        };
+        let tail_label = |mut l: usize| -> Option<usize> {
+            for _ in 0..=self.crossings() {
+                let (c, s) = self.ends[l][0];
+                if !removed[c] {
+                    return Some(l);
+                }
+                l = self.x[c][((s + 2) % 4) as usize];
+            }
+            None
+        };
+        // breadth-first search over the merged faces, crossing edges of the rest
+        let start = find(&mut fp, left[arc[0]]);
+        let goal = find(&mut fp, left[arc[k]]);
+        let mut adj: HashMap<usize, Vec<(usize, usize, bool)>> = HashMap::new(); // face -> (face, edge, left→right)
+        for l in 0..self.edges() {
+            if in_arc.contains(&l) {
+                continue;
+            }
+            let (u, v) = (find(&mut fp, left[l]), find(&mut fp, right[l]));
+            if u != v {
+                adj.entry(u).or_default().push((v, l, true));
+                adj.entry(v).or_default().push((u, l, false));
+            }
+        }
+        let mut prev: HashMap<usize, (usize, usize, bool)> = HashMap::new();
+        let mut queue = std::collections::VecDeque::from([start]);
+        let mut reached = start == goal;
+        while let Some(u) = queue.pop_front() {
+            if reached {
+                break;
+            }
+            for &(v, l, lr) in adj.get(&u).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if v != start && !prev.contains_key(&v) {
+                    prev.insert(v, (u, l, lr));
+                    if v == goal {
+                        reached = true;
+                        break;
+                    }
+                    queue.push_back(v);
+                }
+            }
+        }
+        if !reached {
+            return None;
+        }
+        let mut path: Vec<(usize, bool)> = Vec::new(); // (edge crossed, left→right)
+        let mut v = goal;
+        while v != start {
+            let (u, l, lr) = prev[&v];
+            path.push((l, lr));
+            v = u;
+        }
+        path.reverse();
+        let len = path.len();
+        if len >= k {
+            return None;
+        }
+        // the new code: lifted crossings gone, their under-edges merged
+        // (labelled by the piece leaving a kept crossing)
+        let mut code: Vec<[i64; 4]> = Vec::new();
+        let mut label = vec![0i64; self.edges()];
+        for l in 0..self.edges() {
+            label[l] = if in_arc.contains(&l) {
+                l as i64
+            } else {
+                tail_label(l)? as i64
+            };
+        }
+        let mut pos: HashMap<(usize, u8), (usize, usize)> = HashMap::new(); // old slot -> new slot
+        for c in 0..self.crossings() {
+            if removed[c] {
+                continue;
+            }
+            for s in 0..4u8 {
+                pos.insert((c, s), (code.len(), s as usize));
+            }
+            code.push(self.x[c].map(|l| label[l]));
+        }
+        let mut fresh = self.edges() as i64;
+        let (a0, ak) = (arc[0] as i64, arc[k] as i64);
+        if len == 0 {
+            let (c, s) = self.ends[arc[k]][1];
+            let (i, j) = pos[&(c, s)];
+            code[i][j] = a0;
+        }
+        let mut piece = a0;
+        for (j, &(l, lr)) in path.iter().enumerate() {
+            let g = label[l];
+            let (hc, hs) = head(l)?;
+            let (i, t) = pos[&(hc, hs)];
+            let g2 = fresh;
+            fresh += 1;
+            code[i][t] = g2;
+            let out = if j + 1 == len { ak } else { fresh };
+            if j + 1 < len {
+                fresh += 1;
+            }
+            code.push(if lr {
+                [g, out, g2, piece]
+            } else {
+                [g, piece, g2, out]
+            });
+            piece = out;
+        }
+        Diagram::build(&code, self.free_loops).ok().map(|d| (len, d))
+    }
+
+    /// Whether the strands of a triangular face pass cyclically over one
+    /// another (strand 1 over 2 over 3 over 1, or the reverse), when no
+    /// Reidemeister III move is possible.
+    fn r3_cyclic(&self, face: &[Corner]) -> bool {
+        let (k1, k2, k3) = (face[0].1, face[1].1, face[2].1);
+        let (o13, o12, o23) = (k1 % 2 == 1, (k2 + 1) % 2 == 1, (k3 + 1) % 2 == 1);
+        (o12 && o23 && !o13) || (!o12 && !o23 && o13)
+    }
+
+    /// Reidemeister I and II moves and strand pickups until none is left.
+    fn reduce(&self) -> Diagram {
+        let mut d = self.simplify_basic();
+        while let Some(e) = d.pickup() {
+            d = e.simplify_basic();
+        }
+        d
+    }
+
+    /// Removes kinks and bigons where one strand passes over the other twice
+    /// (Reidemeister I and II) until there are none; the first step of
+    /// [`Self::simplify`].
+    pub fn simplify_basic(&self) -> Diagram {
         let mut code: Vec<[i64; 4]> = self.code_i64(|x, _| *x);
         let mut free = self.free_loops;
         loop {
