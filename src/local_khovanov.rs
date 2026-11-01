@@ -37,13 +37,19 @@ use crate::error::{KnotError, Result};
 use crate::khovanov::{Khovanov, Ring};
 use ncalg::{BigRational, Field, Fp};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+/// Coefficient fields: `Send + Sync` so large cancellations can run on
+/// several threads.
+pub(crate) trait Coef: Field + Send + Sync {}
+impl<C: Field + Send + Sync> Coef for C {}
 
 // ------------------------------------------------------------------ algebra
 
 /// A polynomial in `h`, coefficients from `h^0` up.
 type HPoly<C> = Vec<C>;
 
-fn pmul<C: Field>(a: &HPoly<C>, b: &HPoly<C>) -> HPoly<C> {
+fn pmul<C: Coef>(a: &HPoly<C>, b: &HPoly<C>) -> HPoly<C> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
@@ -71,7 +77,7 @@ struct Term<C> {
 /// A map between two matchings, as a sum of terms (sorted, merged, nonzero).
 type Hom<C> = Vec<Term<C>>;
 
-fn normalize<C: Field>(mut v: Vec<Term<C>>) -> Hom<C> {
+fn normalize<C: Coef>(mut v: Vec<Term<C>>) -> Hom<C> {
     v.sort_by_key(|t| (t.mask, t.hpow));
     let mut out: Vec<Term<C>> = Vec::with_capacity(v.len());
     for t in v {
@@ -84,7 +90,7 @@ fn normalize<C: Field>(mut v: Vec<Term<C>>) -> Hom<C> {
     out
 }
 
-fn scale_hom<C: Field>(h: &Hom<C>, s: &C) -> Hom<C> {
+fn scale_hom<C: Coef>(h: &Hom<C>, s: &C) -> Hom<C> {
     h.iter()
         .map(|t| Term {
             mask: t.mask,
@@ -167,7 +173,7 @@ impl Topo {
 
     /// The map with these dots on the pieces, times `c·h^hpow`, as terms
     /// over the final circles (not normalized).
-    fn evaluate<C: Field>(&self, dots: impl Fn(usize) -> u32, c: &C, hpow: u32, out: &mut Vec<Term<C>>) {
+    fn evaluate<C: Coef>(&self, dots: impl Fn(usize) -> u32, c: &C, hpow: u32, out: &mut Vec<Term<C>>) {
         let mut per = vec![0u32; self.comps.len()];
         for p in 0..self.comp.len() {
             per[self.comp[p]] += dots(p);
@@ -212,7 +218,7 @@ impl Topo {
 /// as an element of `A^{⊗k}`: `Δ^{(k)}(X^d (2X − h)^g)` (for `k = 0`, its
 /// value under the counit).  Small cases are the common ones; they are
 /// computed once and cached.
-fn component_value<C: Field>(d: u32, g: u32, k: usize) -> Vec<(u64, HPoly<C>)> {
+fn component_value<C: Coef>(d: u32, g: u32, k: usize) -> Vec<(u64, HPoly<C>)> {
     // e = X^d (2X − h)^g = a1 + aX·X, with integer coefficients
     let (mut a1, mut ax): (Vec<i64>, Vec<i64>) = if d == 0 {
         (vec![1], Vec::new())
@@ -483,30 +489,86 @@ fn glue(old: &Matching, sm: usize, step: &Step) -> Glued {
 
 // ------------------------------------------------------------------ complexes
 
+/// The surface of a composition `X → M → Y` of maps between matchings.
+fn comp_surface(x: &Matching, mid: &Matching, y: &Matching) -> (usize, Topo) {
+    let c1 = circles(x, mid);
+    let c2 = circles(mid, y);
+    let n1 = c1.len();
+    // the circle of X ∪ M and of M ∪ Y through each arc of M
+    let mut via1 = vec![0; mid.len()];
+    for (i, (_, ms)) in c1.iter().enumerate() {
+        for &a in ms {
+            via1[a] = i;
+        }
+    }
+    let mut via2 = vec![0; mid.len()];
+    for (i, (ms, _)) in c2.iter().enumerate() {
+        for &a in ms {
+            via2[a] = n1 + i;
+        }
+    }
+    let mut x_circle = vec![0; x.len()];
+    for (i, (xs, _)) in c1.iter().enumerate() {
+        for &a in xs {
+            x_circle[a] = i;
+        }
+    }
+    let fin = circles(x, y);
+    let glue: Vec<(usize, usize)> = (0..mid.len()).map(|a| (via1[a], via2[a])).collect();
+    let circ: Vec<usize> = fin.iter().map(|(xs, _)| x_circle[xs[0]]).collect();
+    (n1, Topo::new(n1 + c2.len(), &glue, &circ))
+}
+
 struct Obj {
-    m: Matching,
+    /// The matching, as an index into [`Complex::mats`].
+    m: u32,
     deg: i32,
     q: i32,
     alive: bool,
 }
 
-/// A complex of matchings: objects, and the differential's entries.
+/// The surface of a composition `X → M → Y` (pieces: the circles of
+/// `X ∪ M`, then those of `M ∪ Y`), and the number of the first.
+type CompTopo = Arc<(usize, Topo)>;
+
+/// A complex of matchings: objects, and the differential's entries.  The
+/// matchings are interned, and the surface of each composition of three of
+/// them is computed once.
 struct Complex<C> {
     objs: Vec<Obj>,
     out: Vec<HashMap<usize, Hom<C>>>,
     inc: Vec<HashSet<usize>>,
+    mats: Vec<Matching>,
+    mat_id: HashMap<Matching, u32>,
+    topos: HashMap<(u32, u32, u32), CompTopo>,
 }
 
-impl<C: Field> Complex<C> {
+impl<C: Coef> Complex<C> {
     fn new() -> Self {
         Complex {
             objs: Vec::new(),
             out: Vec::new(),
             inc: Vec::new(),
+            mats: Vec::new(),
+            mat_id: HashMap::new(),
+            topos: HashMap::new(),
         }
     }
 
+    fn mat(&self, x: usize) -> &Matching {
+        &self.mats[self.objs[x].m as usize]
+    }
+
     fn add_obj(&mut self, m: Matching, deg: i32, q: i32) -> usize {
+        let m = match self.mat_id.get(&m) {
+            Some(&id) => id,
+            None => {
+                let id = self.mats.len() as u32;
+                self.mats.push(m.clone());
+                self.mat_id.insert(m, id);
+                id
+            }
+        };
         self.objs.push(Obj {
             m,
             deg,
@@ -545,34 +607,24 @@ impl<C: Field> Complex<C> {
         }
     }
 
-    /// `g ∘ f` for `f: X → M`, `g: M → Y`.
-    fn compose(x: &Matching, mid: &Matching, y: &Matching, f: &Hom<C>, g: &Hom<C>) -> Hom<C> {
-        let c1 = circles(x, mid);
-        let c2 = circles(mid, y);
-        let n1 = c1.len();
-        // the circle of X ∪ M and of M ∪ Y through each arc of M
-        let mut via1 = vec![0; mid.len()];
-        for (i, (_, ms)) in c1.iter().enumerate() {
-            for &a in ms {
-                via1[a] = i;
-            }
+    /// The surface of `X → M → Y`, cached.
+    fn comp_topo(&mut self, x: u32, mid: u32, y: u32) -> CompTopo {
+        if let Some(t) = self.topos.get(&(x, mid, y)) {
+            return t.clone();
         }
-        let mut via2 = vec![0; mid.len()];
-        for (i, (ms, _)) in c2.iter().enumerate() {
-            for &a in ms {
-                via2[a] = n1 + i;
-            }
-        }
-        let mut x_circle = vec![0; x.len()];
-        for (i, (xs, _)) in c1.iter().enumerate() {
-            for &a in xs {
-                x_circle[a] = i;
-            }
-        }
-        let fin = circles(x, y);
-        let glue: Vec<(usize, usize)> = (0..mid.len()).map(|a| (via1[a], via2[a])).collect();
-        let circ: Vec<usize> = fin.iter().map(|(xs, _)| x_circle[xs[0]]).collect();
-        let topo = Topo::new(n1 + c2.len(), &glue, &circ);
+        let (xm, mm, ym) = (
+            &self.mats[x as usize],
+            &self.mats[mid as usize],
+            &self.mats[y as usize],
+        );
+        let t = Arc::new(comp_surface(xm, mm, ym));
+        self.topos.insert((x, mid, y), t.clone());
+        t
+    }
+
+    /// `g ∘ f` for `f: X → M`, `g: M → Y`, given the surface of `X → M → Y`.
+    fn compose(topo: &(usize, Topo), f: &Hom<C>, g: &Hom<C>) -> Hom<C> {
+        let (n1, ref topo) = *topo;
         let mut out = Vec::new();
         for s in f {
             for t in g {
@@ -635,15 +687,30 @@ impl<C: Field> Complex<C> {
         let inv = c.inverse().negated();
         let xs: Vec<usize> = self.inc[b2].iter().copied().filter(|&x| x != b1).collect();
         let ys: Vec<usize> = self.out[b1].keys().copied().filter(|&y| y != b2).collect();
-        let mid = self.objs[b1].m.clone();
+        let mid = self.objs[b1].m;
+        let mut jobs = Vec::with_capacity(xs.len() * ys.len());
         for &x in &xs {
-            let gamma = self.out[x][&b2].clone();
             for &y in &ys {
-                let delta = &self.out[b1][&y];
-                let comp = Self::compose(&self.objs[x].m, &mid, &self.objs[y].m, &gamma, delta);
-                let upd = scale_hom(&comp, &inv);
-                self.add_entry(x, y, upd);
+                let t = self.comp_topo(self.objs[x].m, mid, self.objs[y].m);
+                jobs.push((x, y, t));
             }
+        }
+        let this = &*self;
+        let run = |&(x, y, ref t): &(usize, usize, CompTopo)| {
+            let comp = Self::compose(t, &this.out[x][&b2], &this.out[b1][&y]);
+            (x, y, scale_hom(&comp, &inv))
+        };
+        #[cfg(feature = "parallel")]
+        let upds: Vec<(usize, usize, Hom<C>)> = if jobs.len() >= 64 {
+            use rayon::prelude::*;
+            jobs.par_iter().map(run).collect()
+        } else {
+            jobs.iter().map(run).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let upds: Vec<(usize, usize, Hom<C>)> = jobs.iter().map(run).collect();
+        for (x, y, upd) in upds {
+            self.add_entry(x, y, upd);
         }
         self.remove(b1);
         self.remove(b2);
@@ -688,7 +755,7 @@ fn crossing_order(d: &Diagram) -> Vec<usize> {
 /// The reduced complex of the whole diagram: objects are empty matchings;
 /// returns them with their (homological, quantum) degrees after the global
 /// shift, and the differential.
-fn reduced_complex<C: Field>(d: &Diagram) -> Complex<C> {
+fn reduced_complex<C: Coef>(d: &Diagram) -> Complex<C> {
     let mut cx: Complex<C> = Complex::new();
     // free loops: start from their delooped copies
     let start = cx.add_obj(Vec::new(), 0, 0);
@@ -770,19 +837,40 @@ fn reduced_complex<C: Field>(d: &Diagram) -> Complex<C> {
     cx
 }
 
+/// A map between two pre-objects, apart from its terms: the surface that
+/// glues on the crossing's part (pieces: the first `np` carry the old map's
+/// dots, the crossing's come after), and how the result splits over the
+/// delooped copies (`main` circles of the new matchings, `ls` and `lt`
+/// loops).
+struct Plan {
+    topo: Topo,
+    np: usize,
+    ls: usize,
+    lt: usize,
+    main: usize,
+}
+
+/// (source pre-object, target pre-object, plan, terms, sign).
+type Job<'a, C> = ((usize, usize), (usize, usize), Arc<Plan>, &'a Hom<C>, C);
+
 /// Adds a crossing to the complex: the tensor product with
-/// `smoothing 0 → smoothing 1{1}`, then delooping.
-fn add_crossing<C: Field>(cx: &Complex<C>, step: &Step) -> Complex<C> {
+/// `smoothing 0 → smoothing 1{1}`, then delooping.  The surfaces depend only
+/// on the matchings, so each is computed once; the maps are then built in
+/// parallel.
+fn add_crossing<C: Coef>(cx: &Complex<C>, step: &Step) -> Complex<C> {
     let mut next: Complex<C> = Complex::new();
-    // pre-objects (old object, smoothing) and their delooped copies
-    let mut glued: HashMap<(usize, usize), Glued> = HashMap::new();
+    // per (matching, smoothing): the glued picture; per pre-object
+    // (old object, smoothing): its delooped copies
+    let mut glued: HashMap<(u32, usize), Glued> = HashMap::new();
     let mut ids: HashMap<(usize, usize, u64), usize> = HashMap::new();
     for (i, o) in cx.objs.iter().enumerate() {
         if !o.alive {
             continue;
         }
         for sm in 0..2 {
-            let g = glue(&o.m, sm, step);
+            let g = glued
+                .entry((o.m, sm))
+                .or_insert_with(|| glue(cx.mat(i), sm, step));
             let l = g.loops.len();
             assert!(l < 63, "too many loops");
             for choice in 0..(1u64 << l) {
@@ -790,75 +878,40 @@ fn add_crossing<C: Field>(cx: &Complex<C>, step: &Step) -> Complex<C> {
                 let q = o.q + sm as i32 + (l as i32 - ones) - ones;
                 ids.insert((i, sm, choice), next.add_obj(g.m.clone(), o.deg + sm as i32, q));
             }
-            glued.insert((i, sm), g);
         }
     }
-    // shared labels: which slot
     let slot_of = |l: u32| step.labels.iter().position(|&m| m == l).unwrap();
+    let id_hom: Hom<C> = vec![Term {
+        mask: 0,
+        hpow: 0,
+        c: C::one(),
+    }];
+    let mut plans: HashMap<(u32, u32, usize), Arc<Plan>> = HashMap::new();
+    let mut jobs: Vec<Job<C>> = Vec::new();
     // (a) the old differential, with the identity on the smoothing
     for (i, row) in cx.out.iter().enumerate() {
         if !cx.objs[i].alive {
             continue;
         }
         for (&j, f) in row {
-            let (p, q) = (&cx.objs[i].m, &cx.objs[j].m);
-            let pc = circles(p, q);
-            let np = pc.len();
-            let mut p_circle = vec![0; p.len()];
-            let mut q_circle = vec![0; q.len()];
-            for (k, (ps, qs)) in pc.iter().enumerate() {
-                for &a in ps {
-                    p_circle[a] = k;
-                }
-                for &a in qs {
-                    q_circle[a] = k;
-                }
-            }
-            let pa = arc_of(p);
             for sm in 0..2 {
-                let (gs, gt) = (&glued[&(i, sm)], &glued[&(j, sm)]);
-                // pieces: circles of P ∪ Q, then the smoothing's two strips
-                let strip = |slot: usize| -> usize {
-                    np + SMOOTHING[sm]
-                        .iter()
-                        .position(|&(a, b)| a == slot || b == slot)
-                        .unwrap()
-                };
-                let mut gl = Vec::new();
-                for &s in &step.shared {
-                    gl.push((p_circle[pa[&s]], strip(slot_of(s))));
-                }
-                for &(a, b) in &step.self_pairs {
-                    gl.push((strip(a), strip(b)));
-                }
-                let piece_src = |e: Elem| match e {
-                    Elem::Old(a) => p_circle[a],
-                    Elem::New(k) => np + k,
-                };
-                let piece_tgt = |e: Elem| match e {
-                    Elem::Old(a) => q_circle[a],
-                    Elem::New(k) => np + k,
-                };
-                let (circ, ls, lt) = final_circles(gs, gt, piece_src, piece_tgt);
-                let topo = Topo::new(np + 2, &gl, &circ);
-                let mut terms = Vec::new();
-                for t in f {
-                    let dots = |p: usize| if p < np { (t.mask >> p & 1) as u32 } else { 0 };
-                    topo.evaluate(dots, &t.c, t.hpow, &mut terms);
-                }
-                let h = normalize(terms);
-                deloop(
-                    &mut next,
-                    &ids,
-                    (i, sm),
-                    (j, sm),
-                    &h,
-                    gs.m.len(),
-                    ls,
-                    lt,
-                    &C::one(),
-                    &circ_count(gs, gt),
-                );
+                let key = (cx.objs[i].m, cx.objs[j].m, sm);
+                let plan = plans
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let (gs, gt) = (&glued[&(key.0, sm)], &glued[&(key.1, sm)]);
+                        Arc::new(differential_plan(
+                            cx.mat(i),
+                            cx.mat(j),
+                            gs,
+                            gt,
+                            sm,
+                            step,
+                            &slot_of,
+                        ))
+                    })
+                    .clone();
+                jobs.push(((i, sm), (j, sm), plan, f, C::one()));
             }
         }
     }
@@ -867,45 +920,125 @@ fn add_crossing<C: Field>(cx: &Complex<C>, step: &Step) -> Complex<C> {
         if !o.alive {
             continue;
         }
-        let p = &o.m;
-        let pa = arc_of(p);
-        let np = p.len();
-        let saddle = np;
-        let mut gl = Vec::new();
-        for &s in &step.shared {
-            gl.push((pa[&s], saddle));
-        }
-        for _ in &step.self_pairs {
-            gl.push((saddle, saddle));
-        }
-        let (gs, gt) = (&glued[&(i, 0)], &glued[&(i, 1)]);
-        let piece = |e: Elem| match e {
-            Elem::Old(a) => a,
-            Elem::New(_) => saddle,
-        };
-        let (circ, ls, lt) = final_circles(gs, gt, piece, piece);
-        let mut terms = Vec::new();
-        Topo::new(np + 1, &gl, &circ).evaluate(|_| 0, &C::one(), 0, &mut terms);
-        let h = normalize(terms);
+        let plan = plans
+            .entry((o.m, o.m, 2))
+            .or_insert_with(|| {
+                let (gs, gt) = (&glued[&(o.m, 0)], &glued[&(o.m, 1)]);
+                Arc::new(saddle_plan(cx.mat(i), gs, gt, step))
+            })
+            .clone();
         let sign = if o.deg % 2 == 0 {
             C::one()
         } else {
             C::one().negated()
         };
-        deloop(
-            &mut next,
-            &ids,
-            (i, 0),
-            (i, 1),
-            &h,
-            gs.m.len(),
-            ls,
-            lt,
-            &sign,
-            &circ_count(gs, gt),
-        );
+        jobs.push(((i, 0), (i, 1), plan, &id_hom, sign));
+    }
+    let run = |(src, tgt, plan, f, sign): &Job<C>| -> Vec<(usize, usize, Hom<C>)> {
+        let mut terms = Vec::new();
+        for t in f.iter() {
+            let dots = |p: usize| if p < plan.np { (t.mask >> p & 1) as u32 } else { 0 };
+            plan.topo.evaluate(dots, &t.c, t.hpow, &mut terms);
+        }
+        let h = normalize(terms);
+        deloop(&h, plan.ls, plan.lt, plan.main, sign)
+            .into_iter()
+            .map(|(cs, ct, v)| (ids[&(src.0, src.1, cs)], ids[&(tgt.0, tgt.1, ct)], v))
+            .collect()
+    };
+    #[cfg(feature = "parallel")]
+    let maps: Vec<Vec<(usize, usize, Hom<C>)>> = {
+        use rayon::prelude::*;
+        jobs.par_iter().with_min_len(64).map(run).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let maps: Vec<Vec<(usize, usize, Hom<C>)>> = jobs.iter().map(run).collect();
+    for (a, b, h) in maps.into_iter().flatten() {
+        next.add_entry(a, b, h);
     }
     next
+}
+
+/// The plan of a map `P → Q` of the old differential with the identity on
+/// smoothing `sm`.  Pieces: the circles of `P ∪ Q`, then the smoothing's two
+/// strips.
+fn differential_plan(
+    p: &Matching,
+    q: &Matching,
+    gs: &Glued,
+    gt: &Glued,
+    sm: usize,
+    step: &Step,
+    slot_of: &impl Fn(u32) -> usize,
+) -> Plan {
+    let pc = circles(p, q);
+    let np = pc.len();
+    let mut p_circle = vec![0; p.len()];
+    let mut q_circle = vec![0; q.len()];
+    for (k, (ps, qs)) in pc.iter().enumerate() {
+        for &a in ps {
+            p_circle[a] = k;
+        }
+        for &a in qs {
+            q_circle[a] = k;
+        }
+    }
+    let pa = arc_of(p);
+    let strip = |slot: usize| -> usize {
+        np + SMOOTHING[sm]
+            .iter()
+            .position(|&(a, b)| a == slot || b == slot)
+            .unwrap()
+    };
+    let mut gl = Vec::new();
+    for &s in &step.shared {
+        gl.push((p_circle[pa[&s]], strip(slot_of(s))));
+    }
+    for &(a, b) in &step.self_pairs {
+        gl.push((strip(a), strip(b)));
+    }
+    let piece_src = |e: Elem| match e {
+        Elem::Old(a) => p_circle[a],
+        Elem::New(k) => np + k,
+    };
+    let piece_tgt = |e: Elem| match e {
+        Elem::Old(a) => q_circle[a],
+        Elem::New(k) => np + k,
+    };
+    let (circ, ls, lt) = final_circles(gs, gt, piece_src, piece_tgt);
+    Plan {
+        topo: Topo::new(np + 2, &gl, &circ),
+        np,
+        ls,
+        lt,
+        main: circ_count(gs, gt),
+    }
+}
+
+/// The plan of the saddle from smoothing 0 to smoothing 1 on `P`.  Pieces:
+/// the arcs of `P` (strips), then the saddle; no dots come from an old map.
+fn saddle_plan(p: &Matching, gs: &Glued, gt: &Glued, step: &Step) -> Plan {
+    let pa = arc_of(p);
+    let saddle = p.len();
+    let mut gl = Vec::new();
+    for &s in &step.shared {
+        gl.push((pa[&s], saddle));
+    }
+    for _ in &step.self_pairs {
+        gl.push((saddle, saddle));
+    }
+    let piece = |e: Elem| match e {
+        Elem::Old(a) => a,
+        Elem::New(_) => saddle,
+    };
+    let (circ, ls, lt) = final_circles(gs, gt, piece, piece);
+    Plan {
+        topo: Topo::new(saddle + 1, &gl, &circ),
+        np: 0,
+        ls,
+        lt,
+        main: circ_count(gs, gt),
+    }
 }
 
 fn circ_count(gs: &Glued, gt: &Glued) -> usize {
@@ -930,23 +1063,11 @@ fn final_circles(
     (circ, gs.loops.len(), gt.loops.len())
 }
 
-/// Adds a map between pre-objects to the delooped complex.  A source loop
-/// decorated `u` meets the copy decorated `w` in `ε(u·w)`; a target loop
-/// decorated `u` lands in the copy `u`.
-#[allow(clippy::too_many_arguments)]
-fn deloop<C: Field>(
-    next: &mut Complex<C>,
-    ids: &HashMap<(usize, usize, u64), usize>,
-    src: (usize, usize),
-    tgt: (usize, usize),
-    h: &Hom<C>,
-    _arcs: usize,
-    ls: usize,
-    lt: usize,
-    sign: &C,
-    main: &usize,
-) {
-    let main = *main;
+/// Splits a map between pre-objects over their delooped copies: (source
+/// copy, target copy, map).  A source loop decorated `u` meets the copy
+/// decorated `w` in `ε(u·w)`; a target loop decorated `u` lands in the copy
+/// `u`.
+fn deloop<C: Coef>(h: &Hom<C>, ls: usize, lt: usize, main: usize, sign: &C) -> Vec<(u64, u64, Hom<C>)> {
     let low = if main == 64 { u64::MAX } else { (1u64 << main) - 1 };
     let mut acc: HashMap<(u64, u64), Vec<Term<C>>> = HashMap::new();
     for t in h {
@@ -976,16 +1097,14 @@ fn deloop<C: Field>(
             });
         }
     }
-    for ((cs, ct), v) in acc {
-        let a = ids[&(src.0, src.1, cs)];
-        let b = ids[&(tgt.0, tgt.1, ct)];
-        next.add_entry(a, b, normalize(v));
-    }
+    acc.into_iter()
+        .map(|((cs, ct), v)| (cs, ct, normalize(v)))
+        .collect()
 }
 
 // ------------------------------------------------------------------ results
 
-fn kh_ranks<C: Field>(d: &Diagram) -> BTreeMap<(i64, i64), usize> {
+fn kh_ranks<C: Coef>(d: &Diagram) -> BTreeMap<(i64, i64), usize> {
     let cx: Complex<C> = reduced_complex(d);
     let mut ranks = BTreeMap::new();
     for o in cx.objs.iter().filter(|o| o.alive) {
@@ -1021,7 +1140,7 @@ pub fn khovanov(d: &Diagram, ring: Ring) -> Result<Khovanov> {
 }
 
 /// The Rasmussen invariant over `F` from the reduced complex.
-fn s_invariant<C: Field>(d: &Diagram) -> Result<i64> {
+fn s_invariant<C: Coef>(d: &Diagram) -> Result<i64> {
     if d.components() != 1 {
         return Err(KnotError::Unsupported("the s-invariant is for knots".into()));
     }

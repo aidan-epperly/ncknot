@@ -180,7 +180,11 @@ Khovanov homology costs `2^n` states times `2^{circles}` generators.
 Comfortable sizes are up to about 14 crossings.  The local algorithm's cost depends instead on how many ends of the
 partial tangle are open and how much homology the partial tangles carry:
 the table knots take milliseconds and `T(4,5)` 16 ms; a 28-crossing cabled
-knot about a second.
+knot about a second.  For `s` of large knots use `rasmussen_s_mod` with
+`p = 2³¹ − 1`: a 52-crossing cabled knot takes about 3 minutes over that
+field (on 16 threads, with the `parallel` feature) and 8 over ℚ, where the
+coefficients grow.  Memory, not time, is the limit beyond about 80
+crossings.
 
 ## Roadmap
 

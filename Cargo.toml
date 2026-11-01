@@ -16,11 +16,12 @@ num-traits = "0.2"
 num-integer = "0.1"
 num-bigint = "0.4"
 num-rational = "0.4"
+rayon = { version = "1.10", optional = true }
 
 [features]
 default = ["parallel"]
-# ncalg's multithreaded faer kernels; turn off for WebAssembly
-parallel = ["ncalg/parallel"]
+# multithreading (ncalg's faer kernels, large cancellations); turn off for WebAssembly
+parallel = ["ncalg/parallel", "dep:rayon"]
 
 [dev-dependencies]
 rand = "0.8"
