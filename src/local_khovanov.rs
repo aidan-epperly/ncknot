@@ -36,6 +36,7 @@ use crate::diagram::Diagram;
 use crate::error::{KnotError, Result};
 use crate::khovanov::{Khovanov, Ring};
 use ncalg::{BigRational, Field, Fp};
+use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -74,8 +75,9 @@ struct Term<C> {
     c: C,
 }
 
-/// A map between two matchings, as a sum of terms (sorted, merged, nonzero).
-type Hom<C> = Vec<Term<C>>;
+/// A map between two matchings, as a sum of terms (sorted, merged,
+/// nonzero).  Most maps have one term, which is kept inline.
+type Hom<C> = SmallVec<[Term<C>; 1]>;
 
 fn normalize<C: Coef>(mut v: Vec<Term<C>>) -> Hom<C> {
     v.sort_by_key(|t| (t.mask, t.hpow));
@@ -86,8 +88,7 @@ fn normalize<C: Coef>(mut v: Vec<Term<C>>) -> Hom<C> {
             _ => out.push(t),
         }
     }
-    out.retain(|t| !t.c.is_zero());
-    out
+    out.into_iter().filter(|t| !t.c.is_zero()).collect()
 }
 
 fn scale_hom<C: Coef>(h: &Hom<C>, s: &C) -> Hom<C> {
@@ -302,6 +303,9 @@ fn delta_one(k: usize) -> IntTensor {
 }
 
 // ------------------------------------------------------------------ pictures
+
+/// How many maps are built before they are added to a complex.
+const CHUNK: usize = 1 << 16;
 
 /// A crossingless matching of boundary labels: arcs `(a, b)`, `a < b`, sorted.
 type Matching = Vec<(u32, u32)>;
@@ -585,7 +589,12 @@ impl<C: Coef> Complex<C> {
             return;
         }
         let e = self.out[a].entry(b).or_default();
-        let mut v = std::mem::take(e);
+        if e.is_empty() {
+            *e = h;
+            self.inc[b].insert(a);
+            return;
+        }
+        let mut v: Vec<Term<C>> = std::mem::take(e).into_vec();
         v.extend(h);
         let v = normalize(v);
         if v.is_empty() {
@@ -641,34 +650,47 @@ impl<C: Coef> Complex<C> {
         normalize(out)
     }
 
-    /// Cancels every isomorphism in the differential, cheapest first: the
-    /// cost of cancelling `b1 → b2` is the number of new maps it can create,
-    /// `(incoming of b2 − 1)·(outgoing of b1 − 1)` (Markowitz's rule).
+    /// The Markowitz cost of cancelling `b1 → b2`: the number of new maps
+    /// it can create, `(incoming of b2 − 1)·(outgoing of b1 − 1)`.
+    fn cost(&self, b1: usize, b2: usize) -> usize {
+        (self.inc[b2].len() - 1) * (self.out[b1].len() - 1)
+    }
+
+    /// Cancels every isomorphism in the differential, cheapest first.  The
+    /// costs change as cancellations proceed, so they are kept in a heap and
+    /// rechecked when they come up; isomorphisms that cancellations create
+    /// join the heap.
     fn eliminate(&mut self) {
-        loop {
-            let mut cands: Vec<(usize, usize, usize)> = Vec::new();
-            for b1 in 0..self.objs.len() {
-                if !self.objs[b1].alive {
-                    continue;
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let mut heap = BinaryHeap::new();
+        for b1 in 0..self.objs.len() {
+            if !self.objs[b1].alive {
+                continue;
+            }
+            for (&b2, h) in &self.out[b1] {
+                if self.is_iso(b1, b2, h).is_some() {
+                    heap.push(Reverse((self.cost(b1, b2), b1, b2)));
                 }
-                for (&b2, h) in &self.out[b1] {
-                    if self.is_iso(b1, b2, h).is_some() {
-                        let cost = (self.inc[b2].len() - 1) * (self.out[b1].len() - 1);
-                        cands.push((cost, b1, b2));
+            }
+        }
+        while let Some(Reverse((cost, b1, b2))) = heap.pop() {
+            if !self.objs[b1].alive || !self.objs[b2].alive {
+                continue;
+            }
+            let Some(h) = self.out[b1].get(&b2) else { continue };
+            let Some(c) = self.is_iso(b1, b2, h) else { continue };
+            let now = self.cost(b1, b2);
+            if now > cost && heap.peek().is_some_and(|Reverse((next, _, _))| *next < now) {
+                heap.push(Reverse((now, b1, b2)));
+                continue;
+            }
+            for (x, y) in self.cancel(b1, b2, c) {
+                if let Some(h) = self.out[x].get(&y) {
+                    if self.is_iso(x, y, h).is_some() {
+                        heap.push(Reverse((self.cost(x, y), x, y)));
                     }
                 }
-            }
-            if cands.is_empty() {
-                break;
-            }
-            cands.sort_unstable();
-            for (_, b1, b2) in cands {
-                if !self.objs[b1].alive || !self.objs[b2].alive {
-                    continue;
-                }
-                let Some(h) = self.out[b1].get(&b2) else { continue };
-                let Some(c) = self.is_iso(b1, b2, h) else { continue };
-                self.cancel(b1, b2, c);
             }
         }
     }
@@ -682,74 +704,117 @@ impl<C: Coef> Complex<C> {
         h.iter().find(|t| t.mask == 0 && t.hpow == 0).map(|t| t.c.clone())
     }
 
-    /// Gaussian elimination of the isomorphism `c·id: b1 → b2`.
-    fn cancel(&mut self, b1: usize, b2: usize, c: C) {
+    /// Gaussian elimination of the isomorphism `c·id: b1 → b2`; returns the
+    /// entries it changed.
+    fn cancel(&mut self, b1: usize, b2: usize, c: C) -> Vec<(usize, usize)> {
         let inv = c.inverse().negated();
         let xs: Vec<usize> = self.inc[b2].iter().copied().filter(|&x| x != b1).collect();
         let ys: Vec<usize> = self.out[b1].keys().copied().filter(|&y| y != b2).collect();
         let mid = self.objs[b1].m;
-        let mut jobs = Vec::with_capacity(xs.len() * ys.len());
-        for &x in &xs {
-            for &y in &ys {
-                let t = self.comp_topo(self.objs[x].m, mid, self.objs[y].m);
-                jobs.push((x, y, t));
+        let mut touched = Vec::new();
+        // a chunk of sources at a time, which bounds the memory the new maps
+        // take before they are added (adding x → y changes neither x → b2
+        // nor b1 → y, since x ≠ b1 and y ≠ b2)
+        for xc in xs.chunks((CHUNK / ys.len().max(1)).max(1)) {
+            let mut jobs = Vec::with_capacity(xc.len() * ys.len());
+            for &x in xc {
+                for &y in &ys {
+                    let t = self.comp_topo(self.objs[x].m, mid, self.objs[y].m);
+                    jobs.push((x, y, t));
+                }
             }
-        }
-        let this = &*self;
-        let run = |&(x, y, ref t): &(usize, usize, CompTopo)| {
-            let comp = Self::compose(t, &this.out[x][&b2], &this.out[b1][&y]);
-            (x, y, scale_hom(&comp, &inv))
-        };
-        #[cfg(feature = "parallel")]
-        let upds: Vec<(usize, usize, Hom<C>)> = if jobs.len() >= 64 {
-            use rayon::prelude::*;
-            jobs.par_iter().map(run).collect()
-        } else {
-            jobs.iter().map(run).collect()
-        };
-        #[cfg(not(feature = "parallel"))]
-        let upds: Vec<(usize, usize, Hom<C>)> = jobs.iter().map(run).collect();
-        for (x, y, upd) in upds {
-            self.add_entry(x, y, upd);
+            let this = &*self;
+            let run = |&(x, y, ref t): &(usize, usize, CompTopo)| {
+                let comp = Self::compose(t, &this.out[x][&b2], &this.out[b1][&y]);
+                (!comp.is_empty()).then(|| (x, y, scale_hom(&comp, &inv)))
+            };
+            #[cfg(feature = "parallel")]
+            let upds: Vec<(usize, usize, Hom<C>)> = if jobs.len() >= 64 {
+                use rayon::prelude::*;
+                jobs.par_iter().filter_map(run).collect()
+            } else {
+                jobs.iter().filter_map(run).collect()
+            };
+            #[cfg(not(feature = "parallel"))]
+            let upds: Vec<(usize, usize, Hom<C>)> = jobs.iter().filter_map(run).collect();
+            drop(jobs);
+            for (x, y, upd) in upds {
+                touched.push((x, y));
+                self.add_entry(x, y, upd);
+            }
         }
         self.remove(b1);
         self.remove(b2);
+        touched
     }
 }
 
-/// The order to add crossings in: each next crossing shares the most edges
-/// with what has been added, so that few ends stay open.
+/// The order to add crossings in: a beam search over orders that grow the
+/// tangle along its boundary, scored by the total of `2^{open ends}` over
+/// the steps.  The size of the complexes grows with the number of matchings,
+/// which grows like that; on cabled diagrams this keeps the largest complex
+/// 20 times smaller than adding the crossing that shares the most edges.
 fn crossing_order(d: &Diagram) -> Vec<usize> {
-    let n = d.crossings();
-    let mut done = vec![false; n];
-    let mut open: HashMap<usize, u32> = HashMap::new(); // edge -> times seen
-    let mut order = Vec::with_capacity(n);
-    for _ in 0..n {
-        let mut best: Option<(i64, usize)> = None;
-        for c in 0..n {
-            if done[c] {
-                continue;
+    beam_order(d, 256)
+}
+
+/// Open ends after adding the crossings in `done` (edges seen once).
+fn open_ends(d: &Diagram, done: &[bool]) -> usize {
+    let mut seen: HashMap<usize, u32> = HashMap::new();
+    for (c, &x) in done.iter().enumerate() {
+        if x {
+            for &e in &d.crossing(c) {
+                *seen.entry(e).or_insert(0) += 1;
             }
-            let x = d.crossing(c);
-            let shared = x.iter().filter(|e| open.get(e).copied() == Some(1)).count() as i64;
-            let mut distinct = x.to_vec();
-            distinct.sort_unstable();
-            distinct.dedup();
-            let fresh = distinct.iter().filter(|e| !open.contains_key(e)).count() as i64;
-            // more shared edges first, then fewer new open ends
-            let score = 4 * shared - fresh;
-            if best.is_none_or(|(s, _)| score > s) {
-                best = Some((score, c));
-            }
-        }
-        let (_, c) = best.unwrap();
-        done[c] = true;
-        order.push(c);
-        for &e in &d.crossing(c) {
-            *open.entry(e).or_insert(0) += 1;
         }
     }
-    order
+    seen.values().filter(|&&k| k == 1).count()
+}
+
+/// Beam search, keeping the `width` best partial orders (one per set of
+/// crossings added).
+fn beam_order(d: &Diagram, width: usize) -> Vec<usize> {
+    let n = d.crossings();
+    // (cost, order, done)
+    let mut beam: Vec<(f64, Vec<usize>, Vec<bool>)> = vec![(0.0, Vec::new(), vec![false; n])];
+    for _ in 0..n {
+        let mut next: Vec<(f64, Vec<usize>, Vec<bool>)> = Vec::new();
+        for (cost, order, done) in &beam {
+            // candidates: crossings touching an open edge (any, at the start)
+            let mut open: HashSet<usize> = HashSet::new();
+            let mut cnt: HashMap<usize, u32> = HashMap::new();
+            for (c, &x) in done.iter().enumerate() {
+                if x {
+                    for &e in &d.crossing(c) {
+                        *cnt.entry(e).or_insert(0) += 1;
+                    }
+                }
+            }
+            for (&e, &k) in &cnt {
+                if k == 1 {
+                    open.insert(e);
+                }
+            }
+            let cands: Vec<usize> = (0..n)
+                .filter(|&c| !done[c] && (open.is_empty() || d.crossing(c).iter().any(|e| open.contains(e))))
+                .collect();
+            for c in cands {
+                let mut nd = done.clone();
+                nd[c] = true;
+                let k = open_ends(d, &nd);
+                let mut no = order.clone();
+                no.push(c);
+                next.push((cost + (2f64).powi(k as i32), no, nd));
+            }
+        }
+        // the cheapest order to each set of crossings, then the cheapest sets
+        next.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut seen: HashSet<Vec<bool>> = HashSet::new();
+        next.retain(|x| seen.insert(x.2.clone()));
+        next.truncate(width);
+        beam = next;
+    }
+    beam.swap_remove(0).1
 }
 
 /// The reduced complex of the whole diagram: objects are empty matchings;
@@ -796,12 +861,14 @@ fn reduced_complex<C: Coef>(d: &Diagram) -> Complex<C> {
         cx = add_crossing(&cx, &step);
         let t_add = t0.elapsed().as_secs_f64();
         let before = cx.objs.len();
+        let built: usize = cx.out.iter().map(|r| r.len()).sum();
         cx.eliminate();
         if std::env::var_os("NCKNOT_TRACE").is_some() {
             let alive = cx.objs.iter().filter(|o| o.alive).count();
             let entries: usize = cx.out.iter().map(|r| r.len()).sum();
+            let terms: usize = cx.out.iter().flat_map(|r| r.values()).map(|h| h.len()).sum();
             eprintln!(
-                "crossing {c}: {} open ends, {before} objects -> {alive}, {entries} entries, {:.3}s (adding {t_add:.3}s)",
+                "crossing {c}: {} open ends, {before} objects ({built} maps) -> {alive} ({entries} maps, {terms} terms), {:.3}s (adding {t_add:.3}s)",
                 boundary.len(),
                 t0.elapsed().as_secs_f64()
             );
@@ -881,59 +948,12 @@ fn add_crossing<C: Coef>(cx: &Complex<C>, step: &Step) -> Complex<C> {
         }
     }
     let slot_of = |l: u32| step.labels.iter().position(|&m| m == l).unwrap();
-    let id_hom: Hom<C> = vec![Term {
+    let id_hom: Hom<C> = smallvec![Term {
         mask: 0,
         hpow: 0,
         c: C::one(),
     }];
     let mut plans: HashMap<(u32, u32, usize), Arc<Plan>> = HashMap::new();
-    let mut jobs: Vec<Job<C>> = Vec::new();
-    // (a) the old differential, with the identity on the smoothing
-    for (i, row) in cx.out.iter().enumerate() {
-        if !cx.objs[i].alive {
-            continue;
-        }
-        for (&j, f) in row {
-            for sm in 0..2 {
-                let key = (cx.objs[i].m, cx.objs[j].m, sm);
-                let plan = plans
-                    .entry(key)
-                    .or_insert_with(|| {
-                        let (gs, gt) = (&glued[&(key.0, sm)], &glued[&(key.1, sm)]);
-                        Arc::new(differential_plan(
-                            cx.mat(i),
-                            cx.mat(j),
-                            gs,
-                            gt,
-                            sm,
-                            step,
-                            &slot_of,
-                        ))
-                    })
-                    .clone();
-                jobs.push(((i, sm), (j, sm), plan, f, C::one()));
-            }
-        }
-    }
-    // (b) the saddle, with the identity on the old object; sign (−1)^deg
-    for (i, o) in cx.objs.iter().enumerate() {
-        if !o.alive {
-            continue;
-        }
-        let plan = plans
-            .entry((o.m, o.m, 2))
-            .or_insert_with(|| {
-                let (gs, gt) = (&glued[&(o.m, 0)], &glued[&(o.m, 1)]);
-                Arc::new(saddle_plan(cx.mat(i), gs, gt, step))
-            })
-            .clone();
-        let sign = if o.deg % 2 == 0 {
-            C::one()
-        } else {
-            C::one().negated()
-        };
-        jobs.push(((i, 0), (i, 1), plan, &id_hom, sign));
-    }
     let run = |(src, tgt, plan, f, sign): &Job<C>| -> Vec<(usize, usize, Hom<C>)> {
         let mut terms = Vec::new();
         for t in f.iter() {
@@ -946,15 +966,63 @@ fn add_crossing<C: Coef>(cx: &Complex<C>, step: &Step) -> Complex<C> {
             .map(|(cs, ct, v)| (ids[&(src.0, src.1, cs)], ids[&(tgt.0, tgt.1, ct)], v))
             .collect()
     };
-    #[cfg(feature = "parallel")]
-    let maps: Vec<Vec<(usize, usize, Hom<C>)>> = {
-        use rayon::prelude::*;
-        jobs.par_iter().with_min_len(64).map(run).collect()
-    };
-    #[cfg(not(feature = "parallel"))]
-    let maps: Vec<Vec<(usize, usize, Hom<C>)>> = jobs.iter().map(run).collect();
-    for (a, b, h) in maps.into_iter().flatten() {
-        next.add_entry(a, b, h);
+    // the maps of a chunk of old objects at a time, which bounds the memory
+    // the maps take before they are added
+    let alive: Vec<usize> = (0..cx.objs.len()).filter(|&i| cx.objs[i].alive).collect();
+    let mut k = 0;
+    while k < alive.len() {
+        let mut jobs: Vec<Job<C>> = Vec::new();
+        while k < alive.len() && jobs.len() < CHUNK {
+            let i = alive[k];
+            k += 1;
+            let o = &cx.objs[i];
+            // (a) the old differential, with the identity on the smoothing
+            for (&j, f) in &cx.out[i] {
+                for sm in 0..2 {
+                    let key = (o.m, cx.objs[j].m, sm);
+                    let plan = plans
+                        .entry(key)
+                        .or_insert_with(|| {
+                            let (gs, gt) = (&glued[&(key.0, sm)], &glued[&(key.1, sm)]);
+                            Arc::new(differential_plan(
+                                cx.mat(i),
+                                cx.mat(j),
+                                gs,
+                                gt,
+                                sm,
+                                step,
+                                &slot_of,
+                            ))
+                        })
+                        .clone();
+                    jobs.push(((i, sm), (j, sm), plan, f, C::one()));
+                }
+            }
+            // (b) the saddle, with the identity on the old object; sign (−1)^deg
+            let plan = plans
+                .entry((o.m, o.m, 2))
+                .or_insert_with(|| {
+                    let (gs, gt) = (&glued[&(o.m, 0)], &glued[&(o.m, 1)]);
+                    Arc::new(saddle_plan(cx.mat(i), gs, gt, step))
+                })
+                .clone();
+            let sign = if o.deg % 2 == 0 {
+                C::one()
+            } else {
+                C::one().negated()
+            };
+            jobs.push(((i, 0), (i, 1), plan, &id_hom, sign));
+        }
+        #[cfg(feature = "parallel")]
+        let maps: Vec<Vec<(usize, usize, Hom<C>)>> = {
+            use rayon::prelude::*;
+            jobs.par_iter().with_min_len(64).map(run).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let maps: Vec<Vec<(usize, usize, Hom<C>)>> = jobs.iter().map(run).collect();
+        for (a, b, h) in maps.into_iter().flatten() {
+            next.add_entry(a, b, h);
+        }
     }
     next
 }

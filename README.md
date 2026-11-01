@@ -181,10 +181,10 @@ Comfortable sizes are up to about 14 crossings.  The local algorithm's cost depe
 partial tangle are open and how much homology the partial tangles carry:
 the table knots take milliseconds and `T(4,5)` 16 ms; a 28-crossing cabled
 knot about a second.  For `s` of large knots use `rasmussen_s_mod` with
-`p = 2³¹ − 1`: a 52-crossing cabled knot takes about 3 minutes over that
-field (on 16 threads, with the `parallel` feature) and 8 over ℚ, where the
-coefficients grow.  Memory, not time, is the limit beyond about 80
-crossings.
+`p = 2³¹ − 1`, which is much faster than ℚ, where the coefficients grow.
+Over that field (on 16 threads, with the `parallel` feature) a 52-crossing
+cabled knot takes about 4 seconds, and cabled knots of 80 to 90 crossings a
+few minutes and about 1 GB.
 
 ## Roadmap
 
@@ -192,8 +192,7 @@ crossings.
   BMW algebras.  The quotient algebras are ncalg's, but they need
   rational-function coefficients.
 - Simplification by Reidemeister III moves and search, beyond `simplify`'s
-  R1 and R2.  A faster local Khovanov engine (its complexes of tangles are
-  large for cabled diagrams).
+  R1 and R2.
 - Seifert matrices, Tristram–Levine signatures, and the multivariable
   Alexander polynomial.
 - DT and Gauss codes as input; a larger knot table.
