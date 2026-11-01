@@ -134,7 +134,7 @@ impl Poly {
         }
         let deg = |e: &Vec<u32>| e.iter().sum::<u32>();
         let mut terms: Vec<_> = self.terms.iter().collect();
-        terms.sort_by(|a, b| deg(b.0).cmp(&deg(a.0)).then(a.0.cmp(b.0)));
+        terms.sort_by(|a, b| deg(b.0).cmp(&deg(a.0)).then(b.0.cmp(a.0)));
         let mut s = String::new();
         for (j, (e, c)) in terms.into_iter().enumerate() {
             let mono: Vec<String> = e
@@ -172,6 +172,25 @@ impl Poly {
         s
     }
 
+    /// Parses an expression in the named parameters: integers, names,
+    /// `+ - * /` (division by a constant only), `^` with a natural exponent,
+    /// parentheses, and implicit products like `2n` or `n(n+1)`.
+    pub fn parse(text: &str, names: &[String]) -> Result<Poly> {
+        let mut p = Parser {
+            s: text.chars().filter(|c| !c.is_whitespace()).collect(),
+            i: 0,
+            names,
+        };
+        if p.s.is_empty() {
+            return Err(KnotError::Invalid("empty expression".into()));
+        }
+        let v = p.sum()?;
+        if p.i < p.s.len() {
+            return Err(KnotError::Invalid(format!("unexpected '{}' in {text}", p.s[p.i])));
+        }
+        Ok(v)
+    }
+
     fn add_term(&mut self, e: Vec<u32>, c: BigRational) {
         if c.is_zero() {
             return;
@@ -181,6 +200,125 @@ impl Poly {
         *entry += c;
         if entry.is_zero() {
             self.terms.remove(&e);
+        }
+    }
+}
+
+struct Parser<'a> {
+    s: Vec<char>,
+    i: usize,
+    names: &'a [String],
+}
+
+impl Parser<'_> {
+    fn peek(&self) -> Option<char> {
+        self.s.get(self.i).copied()
+    }
+
+    fn sum(&mut self) -> Result<Poly> {
+        let mut v = self.product()?;
+        while let Some(c @ ('+' | '-')) = self.peek() {
+            self.i += 1;
+            let t = self.product()?;
+            v = if c == '+' { &v + &t } else { &v - &t };
+        }
+        Ok(v)
+    }
+
+    fn product(&mut self) -> Result<Poly> {
+        let mut v = self.power()?;
+        loop {
+            match self.peek() {
+                Some('*') => {
+                    self.i += 1;
+                    v = &v * &self.power()?;
+                }
+                Some('/') => {
+                    self.i += 1;
+                    let d = self.power()?;
+                    let c = d
+                        .as_constant()
+                        .filter(|c| !c.is_zero())
+                        .ok_or_else(|| KnotError::Invalid("division only by a nonzero number".into()))?;
+                    v = &v * &Poly::rational(c.recip());
+                }
+                // implicit product: 2n, n(n+1), (n+1)(n+2)
+                Some(c) if c == '(' || c.is_alphabetic() => v = &v * &self.power()?,
+                _ => return Ok(v),
+            }
+        }
+    }
+
+    fn power(&mut self) -> Result<Poly> {
+        if self.peek() == Some('-') {
+            self.i += 1;
+            return Ok(-self.power()?);
+        }
+        let base = self.atom()?;
+        if self.peek() == Some('^') {
+            self.i += 1;
+            let start = self.i;
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.i += 1;
+            }
+            let k: u32 = self.s[start..self.i]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .map_err(|_| KnotError::Invalid("^ needs a natural number".into()))?;
+            let mut v = Poly::constant(1);
+            for _ in 0..k {
+                v = &v * &base;
+            }
+            return Ok(v);
+        }
+        Ok(base)
+    }
+
+    fn atom(&mut self) -> Result<Poly> {
+        match self.peek() {
+            Some('(') => {
+                self.i += 1;
+                let v = self.sum()?;
+                if self.peek() != Some(')') {
+                    return Err(KnotError::Invalid("missing )".into()));
+                }
+                self.i += 1;
+                Ok(v)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.i;
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.i += 1;
+                }
+                let t: String = self.s[start..self.i].iter().collect();
+                Ok(Poly::rational(BigRational::from_integer(
+                    t.parse::<BigInt>().unwrap(),
+                )))
+            }
+            Some(c) if c.is_alphabetic() || c == '_' => {
+                let start = self.i;
+                while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    self.i += 1;
+                }
+                let name: String = self.s[start..self.i].iter().collect();
+                // a name is a parameter, or a product of one-letter parameters (nm)
+                if let Some(k) = self.names.iter().position(|x| *x == name) {
+                    return Ok(Poly::var(k));
+                }
+                let mut v = Poly::constant(1);
+                for ch in name.chars() {
+                    let k = self
+                        .names
+                        .iter()
+                        .position(|x| *x == ch.to_string())
+                        .ok_or_else(|| KnotError::Invalid(format!("unknown parameter {name}")))?;
+                    v = &v * &Poly::var(k);
+                }
+                Ok(v)
+            }
+            Some(c) => Err(KnotError::Invalid(format!("unexpected '{c}'"))),
+            None => Err(KnotError::Invalid("the expression ends too early".into())),
         }
     }
 }
@@ -284,12 +422,18 @@ mod tests {
         let m = Poly::var(1);
         let names = vec!["n".to_string(), "m".to_string()];
         let p = &(&n + 1) * &n - &m * 2;
-        assert_eq!(p.display(&names), "n^2 - 2*m + n");
+        assert_eq!(p.display(&names), "n^2 + n - 2*m");
         assert_eq!(p.eval_int(&[3, 5]).unwrap(), 2);
         // n(n+1) is always even
         assert_eq!((&(&n + 1) * &n).parity(&[None, None]), None);
         assert_eq!((&m * 2 + 1).parity(&[None, None]), Some(true));
         assert_eq!(m.parity(&[None, Some(true)]), Some(true));
         assert!((&p - &p).is_zero());
+        let parse = |t: &str| Poly::parse(t, &names).unwrap().display(&names);
+        assert_eq!(parse("n^2 + n - 2*m"), "n^2 + n - 2*m");
+        assert_eq!(parse("2n(n+1)/2 - nm"), "n^2 - n*m + n");
+        assert_eq!(parse("-(m - 1)"), "-m + 1");
+        assert!(Poly::parse("k + 1", &names).is_err());
+        assert!(Poly::parse("n/m", &names).is_err());
     }
 }
