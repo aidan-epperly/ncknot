@@ -70,7 +70,7 @@ fn spiral_family_cancellation() {
     println!("{}", c.describe());
     assert_eq!(c.handles.len(), 1);
     assert_eq!(c.handles[0].kind, HandleKind::Framed(Poly::zero()));
-    assert_eq!(c.linking().writhe[0].display(&c.param_names()), "2*n*m + m + n");
+    assert_eq!(c.linking().writhe[0].display(&c.param_names()), "2*n*m + n + m");
     for n in 1..=3 {
         for m in [-3, -1, 1, 3] {
             c.check(&[n, m]).unwrap();

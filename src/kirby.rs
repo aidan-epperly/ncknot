@@ -40,7 +40,7 @@
 
 use crate::diagram::Diagram;
 use crate::error::{KnotError, Result};
-use crate::param::Poly;
+use crate::param::{EvalInt, Poly};
 use std::collections::HashMap;
 
 /// A parameter of the family, with its parity if it is fixed.
@@ -320,7 +320,7 @@ impl KirbyDiagram {
         let h = self.handles.len();
         let mut lk = vec![vec![Poly::zero(); h]; h];
         let mut writhe = vec![Poly::zero(); h];
-        let half = Poly::rational(num_rational::BigRational::new(1.into(), 2.into()));
+        let half = Poly::constant(num_rational::BigRational::new(1.into(), 2.into()));
         let mut add = |a: usize, b: usize, c: Poly| {
             if a == b {
                 writhe[a] = &writhe[a] + &c;
@@ -648,10 +648,10 @@ impl KirbyDiagram {
             .framing(handle)
             .cloned()
             .ok_or_else(|| KnotError::Invalid(format!("{} is not a 2-handle", self.handles[handle].name)))?;
-        let one = Poly::constant(1);
+        let one = Poly::from_i64(1);
         let before = self.linking();
         let lk_br = before.lk[handle][dotted]
-            .as_integer()
+            .as_i64()
             .filter(|v| v.abs() == 1)
             .ok_or_else(|| {
                 KnotError::Invalid(format!(

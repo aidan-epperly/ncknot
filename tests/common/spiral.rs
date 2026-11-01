@@ -38,7 +38,7 @@ pub fn spiral_family() -> KirbyDiagram {
         2,
     );
     let split_out = k.node(NodeKind::Split, 3);
-    let one = Poly::constant(1);
+    let one = Poly::from_i64(1);
     let rr = [(r, 1, one.clone())];
     // R: along the top edge west to east, back along the bottom
     k.edge(&rr, (rut, 2), (rdt, 0));

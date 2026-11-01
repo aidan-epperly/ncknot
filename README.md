@@ -80,8 +80,9 @@ Operations: `mirror`, `reverse`, `disjoint_union`, `writhe`, `sign_counts`,
 
 `Khovanov` has `rank(h, q)`, `total_rank`, `euler_characteristic` (equal to
 `(q + q^{−1}) V` at `t^{1/2} = −q`) and `poincare` (as text).
-`Laurent<C>` is the polynomial type throughout: Laurent polynomials over any
-ncalg `Coeff`, with exact division and evaluation.
+`Laurent<C>` is the polynomial type throughout: ncalg's Laurent polynomials
+over any `Coeff` (`ncalg::commutative::Laurent`, re-exported as
+`ncknot::Laurent`), with exact division and evaluation.
 
 ## Kirby diagrams of families
 
@@ -138,6 +139,7 @@ The tests use them to check the cancellation (`tests/kirby.rs`).
 | Khovanov over `𝔽_p` | `zmod::SparseHowell` |
 | Khovanov over ℤ | `zmod::sparse_invariant_factors` (added for ncknot) |
 | primality, polynomial ring traits | `arith::int`, `Coeff` / `Field` |
+| knot polynomials; widths, framings and linking numbers of families | `commutative::Laurent`, `commutative::MPoly` (moved from ncknot) |
 
 ## Examples, tests and timings
 
