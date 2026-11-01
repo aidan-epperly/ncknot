@@ -235,6 +235,82 @@ impl Diagram {
         }
     }
 
+    /// The Seifert circle of each edge, numbered `0, 1, …`, and the number
+    /// of circles (crossingless loops count, after the others).  The
+    /// oriented smoothing of `X[a, b, c, d]` joins each incoming end to the
+    /// outgoing end next to it: `a–b`, `d–c` if positive, `a–d`, `b–c` if
+    /// negative.
+    pub fn seifert_circles(&self) -> (Vec<usize>, usize) {
+        let m = self.edges();
+        let mut parent: Vec<usize> = (0..m).collect();
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                r = p[r];
+            }
+            p[x] = r;
+            r
+        }
+        for c in 0..self.crossings() {
+            let [a, b, cc, d] = self.x[c];
+            let pairs = if self.sign(c) > 0 {
+                [(a, b), (d, cc)]
+            } else {
+                [(a, d), (b, cc)]
+            };
+            for (u, v) in pairs {
+                let (ru, rv) = (find(&mut parent, u), find(&mut parent, v));
+                parent[ru] = rv;
+            }
+        }
+        let mut id = vec![usize::MAX; m];
+        let mut circle = vec![0; m];
+        let mut k = 0;
+        for e in 0..m {
+            let r = find(&mut parent, e);
+            if id[r] == usize::MAX {
+                id[r] = k;
+                k += 1;
+            }
+            circle[e] = id[r];
+        }
+        (circle, k + self.free_loops)
+    }
+
+    /// The number of connected components of the Seifert graph (a vertex per
+    /// Seifert circle, an edge per crossing) keeping only the crossings of
+    /// sign `sign` (`None`: all of them).  Isolated circles count.
+    pub fn seifert_graph_components(&self, sign: Option<i64>) -> usize {
+        let (circle, k) = self.seifert_circles();
+        let mut parent: Vec<usize> = (0..k).collect();
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                r = p[r];
+            }
+            p[x] = r;
+            r
+        }
+        let mut comps = k;
+        for c in 0..self.crossings() {
+            if sign.is_some_and(|s| s != self.sign(c)) {
+                continue;
+            }
+            // the two circles meeting at a crossing hold its two incoming ends
+            let x = self.x[c];
+            let other_in = if self.sign(c) > 0 { x[3] } else { x[1] };
+            let (u, v) = (
+                find(&mut parent, circle[x[0]]),
+                find(&mut parent, circle[other_in]),
+            );
+            if u != v {
+                parent[u] = v;
+                comps -= 1;
+            }
+        }
+        comps
+    }
+
     /// Numbers of positive and negative crossings `(n₊, n₋)`.
     pub fn sign_counts(&self) -> (usize, usize) {
         let p = (0..self.crossings()).filter(|&c| self.sign(c) > 0).count();

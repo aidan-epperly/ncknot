@@ -58,7 +58,8 @@ virtual codes are rejected.  Edges are renumbered consecutively along the
 components.
 
 Operations: `mirror`, `reverse`, `disjoint_union`, `writhe`, `sign_counts`,
-`components`, `linking_matrix`, `faces`, `pd_code`.  `Braid` adds `compose`,
+`components`, `linking_matrix`, `faces`, `pd_code`, `seifert_circles`,
+`seifert_graph_components` (optionally keeping only the crossings of one sign).  `Braid` adds `compose`,
 `inverse`, `stabilize` (Markov) and `permutation`.
 
 ## Invariants
@@ -143,6 +144,9 @@ The tests use them to check the cancellation (`tests/kirby.rs`).
 - `cargo run --release --example table` prints the invariants of every
   table entry.
 - `cargo run --release --example bench` times each invariant.
+- `cargo run --release --example kirby_family [n_max] [m_max]` cancels the
+  1-handle of the test family and tabulates the writhe, Seifert circles and
+  Seifert graph components of the resulting knot for each `(n, m)`.
 - `cargo test --release`: the table's Alexander polynomials, determinants and
   signatures; Jones polynomials; KnotTheory PD codes; Conway polynomials and
   linking numbers; colorings and `S_m` counts; integral Khovanov homology of

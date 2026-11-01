@@ -298,3 +298,21 @@ fn laurent_arithmetic() {
     assert_eq!(p.to_string(), "2*t^-3 + 5 - t^4");
     assert_eq!(poly(&[(1, 1), (3, -2)]).display_as("t", 2), "t^(1/2) - 2*t^(3/2)");
 }
+
+#[test]
+fn seifert_circles_and_graph() {
+    // a braid closure on k strands has k Seifert circles
+    let t = Braid::new(2, &[1, 1, 1]).unwrap().closure();
+    assert_eq!(t.seifert_circles().1, 2);
+    assert_eq!(t.seifert_graph_components(None), 1);
+    assert_eq!(t.seifert_graph_components(Some(1)), 1);
+    assert_eq!(t.seifert_graph_components(Some(-1)), 2);
+    let f = Braid::new(3, &[1, -2, 1, -2]).unwrap().closure();
+    assert_eq!(f.seifert_circles().1, 3);
+    assert_eq!(f.seifert_graph_components(Some(1)), 2);
+    assert_eq!(f.seifert_graph_components(Some(-1)), 2);
+    // PD input agrees with the braid (KnotTheory's 3_1 is left-handed)
+    let lh = ncknot::Diagram::parse_pd("PD[X[1,4,2,5], X[3,6,4,1], X[5,2,6,3]]").unwrap();
+    assert_eq!(lh.seifert_circles().1, 2);
+    assert_eq!(lh.seifert_graph_components(Some(-1)), 1);
+}
